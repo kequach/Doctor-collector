@@ -1,2 +1,4 @@
 # Doctor collector
- Script to collect mails and automatically contact doctors. This script assumes that you want to scrape data from therapie.de and contact therapists via Gmail.
+This script allows you to accomplish 2 things:
+1. Collect contact information of doctors/therapists via therapie.de
+2. Contact these doctors automatically via Gmail (requires an account or modification of the script to work with other mail providers)

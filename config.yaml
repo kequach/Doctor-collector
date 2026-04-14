@@ -1,0 +1,55 @@
+# therapie.de search parameters
+therapie:
+  # Postal code for the therapist search (5 km radius)
+  post_code: "88045"
+
+  # Therapy form: 1 = Einzeltherapie, 2 = Gruppentherapie, 3 = Paar-/Familientherapie
+  therapy_form: 1
+
+  # Therapy type: 1 = Analytische Psychotherapie, 2 = Verhaltenstherapie,
+  #               3 = Tiefenpsychologisch fundierte Psychotherapie,
+  #               4 = Systemische Therapie
+  therapy_type: 2
+
+  # Page to start scraping from (useful for resuming interrupted runs)
+  start_page: 1
+
+  # Maximum number of listing pages to crawl
+  max_pages: 100
+
+  # Delay between HTTP requests (seconds) to avoid rate limiting
+  request_delay_seconds: 1.0
+
+# Therapist filters — exclude profiles whose type contains these keywords
+filters:
+  exclude_types:
+    - "Heil"
+    - "Kinder"
+    - "Privat"
+
+# Contact settings — used when running with --contact
+contact:
+  subject: "Erstgespräch Anfrage"
+
+  # The email body to send. Use a multi-line YAML string.
+  body: |
+    Sehr geehrte Damen und Herren,
+
+    Ich möchte ein Erstgespräch bei Ihnen anfragen.
+
+    (Hier relevante Informationen einfügen)
+
+    Ich danke Ihnen im Voraus. Ansonsten wäre ich über eine schriftliche Absage
+    sehr dankbar, sodass ich einen Nachweis für die Krankenkasse habe.
+
+    Mit freundlichen Grüßen
+    Max Mustermann
+
+  # SMTP settings — Gmail requires an App Password (not your regular password).
+  # Create one at: https://myaccount.google.com/apppasswords
+  smtp_host: "smtp.gmail.com"
+  smtp_port: 465
+  use_tls: true
+  smtp_user: ""
+  smtp_password: ""
+  from_address: ""

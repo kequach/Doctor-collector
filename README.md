@@ -122,21 +122,15 @@ Both also require app passwords. See your provider's help pages for details.
 
 ## Docker
 
-Build the image once:
-
-```
-docker build -t doctor-collector .
-```
-
-All examples below mount a `./data` folder so that output files are saved on your machine (not lost when the container stops). Fill in your values where indicated.
+All examples below mount a `./data` folder so that output files are saved on your machine. Fill in your values where indicated.
 
 **Step 1 — Collect therapists:**
 
 ```
-docker run --rm -v ./config.yaml:/app/config.yaml -v ./data:/app/data \
+docker run --rm -v ./data:/app/data \
   -e CSV_FILE=/app/data/therapists.csv \
   -e THERAPIE_POST_CODE=10115 \
-  doctor-collector python -m doctor_collector --collect
+  kequach/doctor-collector python -m doctor_collector --collect
 ```
 
 **Step 2 — Review the results:**
@@ -146,21 +140,21 @@ The collected data is saved to `./data/therapists.csv`. Open it in Excel, Google
 **Step 3 — Contact therapists:**
 
 ```
-docker run --rm -v ./config.yaml:/app/config.yaml -v ./data:/app/data \
+docker run --rm -v ./data:/app/data \
   -e CSV_FILE=/app/data/therapists.csv \
   -e STATE_FILE=/app/data/.contacted_therapists.json \
   -e CONTACT_SMTP_USER=you@gmail.com \
   -e CONTACT_SMTP_PASSWORD=your-16-char-app-password \
   -e CONTACT_FROM_ADDRESS=you@gmail.com \
-  doctor-collector python -m doctor_collector --contact
+  kequach/doctor-collector python -m doctor_collector --contact
 ```
 
-You can also combine both steps into a single run without a config file — just fill in your values:
+You can also combine both steps into a single run — just fill in your values:
 
 ```
 docker run --rm -v ./data:/app/data \
-  -e STATE_FILE=/app/data/.contacted_therapists.json \
   -e CSV_FILE=/app/data/therapists.csv \
+  -e STATE_FILE=/app/data/.contacted_therapists.json \
   -e THERAPIE_POST_CODE=10115 \
   -e THERAPIE_THERAPY_FORM=1 \
   -e THERAPIE_THERAPY_TYPE=2 \
@@ -169,7 +163,7 @@ docker run --rm -v ./data:/app/data \
   -e CONTACT_FROM_ADDRESS=you@gmail.com \
   -e CONTACT_SUBJECT="Erstgespräch Anfrage" \
   -e CONTACT_BODY="Sehr geehrte Damen und Herren, ich möchte ein Erstgespräch bei Ihnen anfragen. Mit freundlichen Grüßen, Max Mustermann" \
-  doctor-collector python -m doctor_collector --collect --contact
+  kequach/doctor-collector python -m doctor_collector --collect --contact
 ```
 
 ## License

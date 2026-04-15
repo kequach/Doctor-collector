@@ -1,7 +1,7 @@
 # therapie.de search parameters
 therapie:
   # Postal code for the therapist search (5 km radius)
-  post_code: "88045"
+  post_code: ""
 
   # Therapy form: 1 = Einzeltherapie, 2 = Gruppentherapie, 3 = Paar-/Familientherapie
   therapy_form: 1
@@ -17,8 +17,9 @@ therapie:
   # Maximum number of listing pages to crawl
   max_pages: 100
 
-  # Delay between HTTP requests (seconds) to avoid rate limiting
-  request_delay_seconds: 1.0
+  # Delay between HTTP requests (seconds). Profiles are fetched concurrently
+  # (up to 8 at a time), so this is per-request, not per-page.
+  request_delay_seconds: 0.2
 
 # Therapist filters — exclude profiles whose type contains these keywords
 filters:

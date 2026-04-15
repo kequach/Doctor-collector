@@ -26,6 +26,7 @@ logger = logging.getLogger(__name__)
 _BASE_URL = "https://www.therapie.de"
 _PROFILE_LINK_RE = re.compile(r"/profil/")
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
+_MAX_CONCURRENT = 8
 
 
 def _decode_email(encoded: str) -> str:
@@ -42,6 +43,7 @@ class TherapieClient:
 
     All requests use httpx (async HTTP) — no browser automation needed.
     Emails are decoded from an obfuscated HTML attribute on the profile page.
+    Profile pages are fetched concurrently (up to 8 at a time) for speed.
     """
 
     def __init__(self, config: AppConfig) -> None:
@@ -51,6 +53,7 @@ class TherapieClient:
             follow_redirects=True,
             headers={"User-Agent": _USER_AGENT},
         )
+        self._sem = asyncio.Semaphore(_MAX_CONCURRENT)
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -76,15 +79,8 @@ class TherapieClient:
                 profile_urls, next_url = await self._parse_listing_page(current_url)
                 logger.info("Found %d profiles on page %d", len(profile_urls), page_num)
 
-                for profile_url in profile_urls:
-                    try:
-                        profile = await self._extract_profile(profile_url)
-                        all_therapists.append(profile)
-                        logger.info("Extracted: %s", profile.name)
-                    except Exception:
-                        logger.exception("Failed to extract profile: %s", profile_url)
-
-                    await asyncio.sleep(cfg.request_delay_seconds)
+                profiles = await self._fetch_profiles_batch(profile_urls, cfg.request_delay_seconds)
+                all_therapists.extend(profiles)
 
                 current_url = next_url
                 page_num += 1
@@ -95,6 +91,27 @@ class TherapieClient:
 
         logger.info("Crawling complete — %d profiles collected", len(all_therapists))
         return all_therapists
+
+    async def _fetch_profiles_batch(
+        self, urls: list[str], delay: float
+    ) -> list[TherapistProfile]:
+        """Fetch multiple profile pages concurrently with a semaphore limit."""
+
+        async def _limited(url: str) -> TherapistProfile | None:
+            async with self._sem:
+                if delay > 0:
+                    await asyncio.sleep(delay)
+                try:
+                    return await self._extract_profile(url)
+                except Exception:
+                    logger.exception("Failed to extract profile: %s", url)
+                    return None
+
+        results = await asyncio.gather(*[_limited(u) for u in urls])
+        profiles = [p for p in results if p is not None]
+        for p in profiles:
+            logger.info("Extracted: %s", p.name)
+        return profiles
 
     async def _parse_listing_page(self, url: str) -> tuple[list[str], str | None]:
         """Fetch a listing page and return (profile_urls, next_page_url)."""

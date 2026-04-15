@@ -15,8 +15,6 @@ from typing import Any
 
 import yaml
 from pydantic import BaseModel, Field, model_validator
-from ruamel.yaml import YAML
-from ruamel.yaml.comments import CommentedSeq
 
 logger = logging.getLogger(__name__)
 
@@ -115,7 +113,7 @@ class TherapieConfig(BaseModel):
     therapy_type: int = Field(default=2, ge=1)
     start_page: int = Field(default=1, ge=1)
     max_pages: int = Field(default=100, ge=1)
-    request_delay_seconds: float = Field(default=1.0, ge=0)
+    request_delay_seconds: float = Field(default=0.2, ge=0)
 
 
 class FilterConfig(BaseModel):
@@ -143,61 +141,6 @@ class AppConfig(BaseModel):
         if self.therapie.post_code:
             self.therapie.post_code = self.therapie.post_code.strip()
         return self
-
-    @property
-    def search_url(self) -> str:
-        t = self.therapie
-        return (
-            f"https://www.therapie.de/therapeutensuche/ergebnisse/"
-            f"?ort={t.post_code}&page={t.start_page}"
-            f"&therapieangebot={t.therapy_form}&verfahren={t.therapy_type}"
-        )
-
-
-# ---------------------------------------------------------------------------
-# YAML persistence (comment-preserving)
-# ---------------------------------------------------------------------------
-
-
-def _deep_update_yaml(target: dict, source: dict) -> None:
-    for key, value in source.items():
-        if isinstance(value, dict) and isinstance(target.get(key), dict):
-            _deep_update_yaml(target[key], value)
-        elif isinstance(value, list):
-            old = target.get(key)
-            new_seq = CommentedSeq(value)
-            if isinstance(old, CommentedSeq) and old.ca.items:
-                last_old = max(old.ca.items)
-                last_new = len(new_seq) - 1
-                if last_new >= 0:
-                    new_seq.ca.items[last_new] = old.ca.items[last_old]
-            target[key] = new_seq
-        else:
-            target[key] = value
-
-
-def _write_yaml(data: dict[str, Any], path: Path) -> None:
-    rt = YAML()
-    rt.preserve_quotes = True
-
-    if path.exists():
-        existing = rt.load(path.read_text(encoding="utf-8"))
-        if isinstance(existing, dict):
-            _deep_update_yaml(existing, data)
-            to_write = existing
-        else:
-            to_write = data
-    else:
-        to_write = data
-
-    with path.open("w", encoding="utf-8") as fh:
-        rt.dump(to_write, fh)
-    logger.info("Configuration written to %s", path)
-
-
-def save_config(config: AppConfig, path: Path | str | None = None) -> None:
-    config_path = Path(path) if path else _DEFAULT_CONFIG_PATH
-    _write_yaml(config.model_dump(), config_path)
 
 
 def load_config(

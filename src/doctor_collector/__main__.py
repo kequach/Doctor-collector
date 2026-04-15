@@ -95,7 +95,8 @@ async def _run(config_path: str | None, *, collect: bool, contact: bool) -> None
             if not to_contact:
                 print("  All therapists have already been contacted.")
             else:
-                print(f"  {len(to_contact)} therapist(s) to contact ({len(already_contacted)} already contacted).")
+                already = len(already_contacted)
+                print(f"  {len(to_contact)} therapist(s) to contact ({already} already contacted).")
                 contacted = await contactor.contact(to_contact)
                 contacted_emails = {t.email for t in contacted if t.email}
                 collector.mark_contacted(contacted_emails)

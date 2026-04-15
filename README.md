@@ -1,118 +1,74 @@
 # Doctor Collector
 
-License: MIT
-Python 3.11+
-Docker
-
-A CLI tool that collects therapist contact information from [therapie.de](https://www.therapie.de) and optionally contacts them via email. Talks directly to therapie.de's server-rendered HTML — no browser automation or Selenium required.
-
-## Table of Contents
-
-- [Quick Start](#quick-start)
-- [Usage](#usage)
-- [Configuration](#configuration)
-- [Deployment](#deployment)
-- [Development](#development)
+Automatically find therapists on [therapie.de](https://www.therapie.de) and send them a request for an initial consultation (Erstgespräch) via email.
 
 ## Quick Start
 
-### Install
+### 1. Install Python
 
-Requires Python 3.11+.
+Download and install Python 3.11 or newer from the official website:
 
-```bash
+**[Download Python](https://www.python.org/downloads/)**
+
+During installation on Windows, make sure to check **"Add Python to PATH"**.
+
+### 2. Download this project
+
+[Download as ZIP](https://github.com/kequach/Doctor-collector/archive/refs/heads/main.zip) and extract it, or use Git:
+
+```
 git clone https://github.com/kequach/Doctor-collector.git
-cd Doctor-collector
-python -m pip install -e .
 ```
 
-### Run
+### 3. Install dependencies
 
-The tool has two modes that can be used independently or together:
+Open a terminal in the project folder and run:
 
-```bash
-# Collect therapist data only (saves to therapists.csv)
+```
+pip install -e .
+```
+
+### 4. Configure
+
+Open `config.yaml` in any text editor and fill in:
+
+- **Your postal code** (the tool searches within a 5 km radius)
+- **Your email credentials** (only needed if you want to send emails — see [Contact settings](#contact-settings) below)
+
+### 5. Run
+
+```
 python -m doctor_collector --collect
-
-# Contact therapists only (uses previously collected data)
-python -m doctor_collector --contact
-
-# Collect and contact in one run
-python -m doctor_collector --collect --contact
 ```
 
-Before running, edit `config.yaml` to set your postal code and (for `--contact`) your SMTP credentials.
+This searches therapie.de, filters the results, and saves everything to `therapists.csv`. You can open this file in Excel.
 
 ## Usage
 
-### Mode 1: Collect (`--collect`)
+| Command | What it does |
+|---------|-------------|
+| `python -m doctor_collector --collect` | Find therapists and save to `therapists.csv` |
+| `python -m doctor_collector --contact` | Send emails to therapists in `therapists.csv` |
+| `python -m doctor_collector --collect --contact` | Find therapists and email them in one go |
 
-Scrapes therapist profiles from therapie.de based on your search parameters, applies filters, and saves matching therapists to `therapists.csv`.
+A typical workflow:
 
-```bash
-python -m doctor_collector --collect
-```
-
-Output:
-
-```
-============================================================
-  Doctor Collector — 5 therapist(s)
-============================================================
-
-  1. Dr. Maria Schmidt
-     Psychologische Psychotherapeutin
-     Email:   m.schmidt@example.de
-     Website: https://www.praxis-schmidt.de
-     Profile: https://www.therapie.de/profil/schmidt/
-
-  2. Thomas Müller
-     Psychologischer Psychotherapeut
-     Email:   t.mueller@example.de
-     Profile: https://www.therapie.de/profil/mueller/
-
-  ...
-
-  Scraped 42 profiles, 5 matched your filters.
-  Results saved to therapists.csv
-```
-
-### Mode 2: Contact (`--contact`)
-
-Sends your email template to all therapists in `therapists.csv` who haven't been contacted yet. Tracks contacted emails in `.contacted_therapists.json` so you never email anyone twice.
-
-```bash
-python -m doctor_collector --contact
-```
-
-### Both together
-
-Collect fresh data and immediately contact new therapists:
-
-```bash
-python -m doctor_collector --collect --contact
-```
-
-### Custom config path
-
-```bash
-python -m doctor_collector --collect --config /path/to/my-config.yaml
-```
+1. Run with `--collect` first to review the results in `therapists.csv`
+2. Once you're happy with the list, run with `--contact` to send emails
+3. The tool remembers who you already contacted — running again only emails new therapists
 
 ## Configuration
 
-All settings live in `config.yaml`. You can also set them via environment variables.
+All settings are in `config.yaml`. Open it in any text editor.
 
-### Search parameters
+### Search settings
 
 ```yaml
 therapie:
-  post_code: "10115"           # German postal code (5 km radius)
-  therapy_form: 1              # 1=Einzeltherapie, 2=Gruppentherapie, 3=Paar-/Familientherapie
-  therapy_type: 2              # 1=Analytische, 2=Verhaltenstherapie, 3=Tiefenpsych., 4=Systemische
-  start_page: 1                # page to start from (for resuming)
-  max_pages: 100               # max listing pages to crawl
-  request_delay_seconds: 1.0   # delay between requests (rate limiting)
+  post_code: "10115"         # your postal code (5 km search radius)
+  therapy_form: 1            # 1 = Einzeltherapie, 2 = Gruppentherapie, 3 = Paar-/Familientherapie
+  therapy_type: 2            # 1 = Analytische, 2 = Verhaltenstherapie, 3 = Tiefenpsychologisch, 4 = Systemische
+  max_pages: 100             # how many pages of results to go through
 ```
 
 ### Filters
@@ -120,169 +76,100 @@ therapie:
 ```yaml
 filters:
   exclude_types:
-    - "Heil"      # exclude Heilpraktiker
-    - "Kinder"    # exclude child therapists
-    - "Privat"    # exclude private-only therapists
+    - "Heil"       # excludes Heilpraktiker
+    - "Kinder"     # excludes child/youth therapists
+    - "Privat"     # excludes private-only therapists
 ```
 
-Therapists whose type description contains any keyword (case-insensitive) are excluded. Only therapists with an email address are included.
+Add or remove keywords to control which therapists are excluded. Only therapists with an email address are included.
 
 ### Contact settings
 
-Used when running with `--contact`. Gmail requires an [App Password](https://support.google.com/accounts/answer/185833) (enable 2-Step Verification first).
+Only needed when running with `--contact`. If you use Gmail, you need an **App Password** instead of your regular password:
+
+1. Go to [myaccount.google.com](https://myaccount.google.com/) > **Security** > enable **2-Step Verification**
+2. Go to [App Passwords](https://myaccount.google.com/apppasswords), create one for "Mail"
+3. Copy the 16-character password into `config.yaml`:
 
 ```yaml
 contact:
   subject: "Erstgespräch Anfrage"
   body: |
     Sehr geehrte Damen und Herren,
+
+    Ich möchte ein Erstgespräch bei Ihnen anfragen.
     ...
+
   smtp_host: "smtp.gmail.com"
   smtp_port: 465
   use_tls: true
   smtp_user: "you@gmail.com"
-  smtp_password: "your-app-password"
+  smtp_password: "your-16-char-app-password"
   from_address: "you@gmail.com"
 ```
 
-**Other email providers:**
+<details>
+<summary>Using Outlook or Yahoo instead of Gmail?</summary>
 
-| Provider | smtp_host | smtp_port | Notes |
-|----------|-----------|-----------|-------|
-| Gmail | smtp.gmail.com | 465 | Requires [App Password](https://support.google.com/accounts/answer/185833) |
-| Outlook / Microsoft 365 | smtp.office365.com | 587 | Use full email as smtp_user |
-| Yahoo | smtp.mail.yahoo.com | 587 | Requires [App Password](https://help.yahoo.com/kb/generate-manage-third-party-passwords-sln15241.html) |
+| Provider | smtp_host | smtp_port |
+|----------|-----------|-----------|
+| Outlook / Microsoft 365 | smtp.office365.com | 587 |
+| Yahoo | smtp.mail.yahoo.com | 587 |
 
-### Environment variables
+Both also require app passwords. See your provider's help pages for details.
 
-Every config option can be set via environment variables:
+</details>
 
-| Env Variable | Type | Config Equivalent |
-|-------------|------|-------------------|
-| `THERAPIE_POST_CODE` | string | `therapie.post_code` |
-| `THERAPIE_THERAPY_FORM` | int | `therapie.therapy_form` |
-| `THERAPIE_THERAPY_TYPE` | int | `therapie.therapy_type` |
-| `THERAPIE_START_PAGE` | int | `therapie.start_page` |
-| `THERAPIE_MAX_PAGES` | int | `therapie.max_pages` |
-| `THERAPIE_REQUEST_DELAY` | float | `therapie.request_delay_seconds` |
-| `FILTER_EXCLUDE_TYPES` | comma-separated | `filters.exclude_types` |
-| `CONTACT_SUBJECT` | string | `contact.subject` |
-| `CONTACT_BODY` | string | `contact.body` |
-| `CONTACT_SMTP_HOST` | string | `contact.smtp_host` |
-| `CONTACT_SMTP_PORT` | int | `contact.smtp_port` |
-| `CONTACT_USE_TLS` | true/false | `contact.use_tls` |
-| `CONTACT_SMTP_USER` | string | `contact.smtp_user` |
-| `CONTACT_SMTP_PASSWORD` | string | `contact.smtp_password` |
-| `CONTACT_FROM_ADDRESS` | string | `contact.from_address` |
+## Docker
 
-## Deployment
+Build the image once:
 
-### Docker
-
-**Build:**
-
-```bash
+```
 docker build -t doctor-collector .
 ```
 
-**Collect only:**
+All examples below mount a `./data` folder so that output files are saved on your machine (not lost when the container stops). Fill in your values where indicated.
 
-```bash
-docker run --rm \
-  -v ./config.yaml:/app/config.yaml \
-  -v ./data:/app/data \
-  -e STATE_FILE=/app/data/.contacted_therapists.json \
+**Step 1 — Collect therapists:**
+
+```
+docker run --rm -v ./config.yaml:/app/config.yaml -v ./data:/app/data \
   -e CSV_FILE=/app/data/therapists.csv \
-  doctor-collector \
-  python -m doctor_collector --collect
+  -e THERAPIE_POST_CODE=10115 \
+  doctor-collector python -m doctor_collector --collect
 ```
 
-**Contact only:**
+**Step 2 — Review the results:**
 
-```bash
-docker run --rm \
-  -v ./config.yaml:/app/config.yaml \
-  -v ./data:/app/data \
-  -e STATE_FILE=/app/data/.contacted_therapists.json \
+The collected data is saved to `./data/therapists.csv`. Open it in Excel, Google Sheets, or any text editor to review before contacting.
+
+**Step 3 — Contact therapists:**
+
+```
+docker run --rm -v ./config.yaml:/app/config.yaml -v ./data:/app/data \
   -e CSV_FILE=/app/data/therapists.csv \
-  doctor-collector \
-  python -m doctor_collector --contact
-```
-
-**Collect and contact:**
-
-```bash
-docker run --rm \
-  -v ./config.yaml:/app/config.yaml \
-  -v ./data:/app/data \
   -e STATE_FILE=/app/data/.contacted_therapists.json \
-  -e CSV_FILE=/app/data/therapists.csv \
-  doctor-collector \
-  python -m doctor_collector --collect --contact
+  -e CONTACT_SMTP_USER=you@gmail.com \
+  -e CONTACT_SMTP_PASSWORD=your-16-char-app-password \
+  -e CONTACT_FROM_ADDRESS=you@gmail.com \
+  doctor-collector python -m doctor_collector --contact
 ```
 
-**Using Docker Compose:**
+You can also combine both steps into a single run without a config file — just fill in your values:
 
-```bash
-# Default (collect only, as defined in docker-compose.yml):
-docker compose run --rm doctor-collector
-
-# Contact only:
-docker compose run --rm doctor-collector python -m doctor_collector --contact
-
-# Both:
-docker compose run --rm doctor-collector python -m doctor_collector --collect --contact
 ```
-
-### Docker with env vars only
-
-```bash
-docker run --rm \
-  -v ./data:/app/data \
+docker run --rm -v ./data:/app/data \
   -e STATE_FILE=/app/data/.contacted_therapists.json \
   -e CSV_FILE=/app/data/therapists.csv \
   -e THERAPIE_POST_CODE=10115 \
   -e THERAPIE_THERAPY_FORM=1 \
   -e THERAPIE_THERAPY_TYPE=2 \
-  -e FILTER_EXCLUDE_TYPES=Heil,Kinder,Privat \
-  doctor-collector \
-  python -m doctor_collector --collect
-```
-
-### Data files
-
-| File | Purpose |
-|------|---------|
-| `therapists.csv` | Collected therapist data (name, email, type, website, profile URL) |
-| `.contacted_therapists.json` | Tracks which emails have been sent to prevent duplicates |
-
-Both are created automatically. The state file ensures you never contact the same therapist twice, even across multiple runs.
-
-## Development
-
-```bash
-pip install -e ".[dev]"
-python -m pytest tests/ -v
-python -m ruff check src/ tests/
-```
-
-### How it works
-
-The collector fetches therapist listings from [therapie.de](https://www.therapie.de) using pure HTTP requests (httpx). Email addresses are embedded in the HTML source as obfuscated `data-contact-email` attributes on the contact button — no browser automation needed. The collector decodes them with a simple character-shift cipher and extracts all profile data from the server-rendered HTML.
-
-### Project structure
-
-```
-src/doctor_collector/
-├── __main__.py              # CLI entry-point (--collect / --contact)
-├── config.py                # YAML + env var config loading
-├── clients/therapie.py      # therapie.de HTTP client (pure httpx)
-├── models/therapist.py      # Pydantic models
-├── services/
-│   ├── collector.py         # Scraping, filtering, CSV + state management
-│   └── contactor.py         # SMTP email sending to therapists
-└── notifications/
-    └── console.py           # CLI output formatting
+  -e CONTACT_SMTP_USER=you@gmail.com \
+  -e CONTACT_SMTP_PASSWORD=your-16-char-app-password \
+  -e CONTACT_FROM_ADDRESS=you@gmail.com \
+  -e CONTACT_SUBJECT="Erstgespräch Anfrage" \
+  -e CONTACT_BODY="Sehr geehrte Damen und Herren, ich möchte ein Erstgespräch bei Ihnen anfragen. Mit freundlichen Grüßen, Max Mustermann" \
+  doctor-collector python -m doctor_collector --collect --contact
 ```
 
 ## License

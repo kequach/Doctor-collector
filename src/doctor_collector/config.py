@@ -14,12 +14,13 @@ from pathlib import Path
 from typing import Any
 
 import yaml
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 logger = logging.getLogger(__name__)
 
 _ENV_VAR_RE = re.compile(r"\$\{([^}]+)\}")
 _DEFAULT_CONFIG_PATH = Path.cwd() / "config.yaml"
+_SUPPORTED_SEARCH_RADII_KM = (10, 25, 50, 100)
 
 
 def _resolve_env_vars(value: object) -> object:
@@ -47,6 +48,7 @@ def _resolve_env_vars(value: object) -> object:
 
 _ENV_MAP: list[tuple[str, list[str], str]] = [
     ("THERAPIE_POST_CODE", ["therapie", "post_code"], "str"),
+    ("THERAPIE_SEARCH_RADIUS_KM", ["therapie", "search_radius_km"], "int"),
     ("THERAPIE_THERAPY_FORM", ["therapie", "therapy_form"], "int"),
     ("THERAPIE_THERAPY_TYPE", ["therapie", "therapy_type"], "int"),
     ("THERAPIE_START_PAGE", ["therapie", "start_page"], "int"),
@@ -109,11 +111,20 @@ def _deep_merge(base: dict, override: dict) -> dict:
 
 class TherapieConfig(BaseModel):
     post_code: str = ""
+    search_radius_km: int = Field(default=10)
     therapy_form: int = Field(default=1, ge=1)
     therapy_type: int = Field(default=2, ge=1)
     start_page: int = Field(default=1, ge=1)
     max_pages: int = Field(default=100, ge=1)
     request_delay_seconds: float = Field(default=0.2, ge=0)
+
+    @field_validator("search_radius_km")
+    @classmethod
+    def _validate_search_radius_km(cls, value: int) -> int:
+        if value not in _SUPPORTED_SEARCH_RADII_KM:
+            supported = ", ".join(str(radius) for radius in _SUPPORTED_SEARCH_RADII_KM)
+            raise ValueError(f"search_radius_km must be one of: {supported}")
+        return value
 
 
 class FilterConfig(BaseModel):

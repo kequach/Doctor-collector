@@ -32,7 +32,7 @@ pip install -e .
 
 Open `config.yaml` in any text editor and fill in:
 
-- **Your postal code** (the tool searches within a 5 km radius)
+- **Your postal code** and desired search radius
 - **Your email credentials** (only needed if you want to send emails — see [Contact settings](#contact-settings) below)
 
 ### 5. Run
@@ -65,11 +65,14 @@ All settings are in `config.yaml`. Open it in any text editor.
 
 ```yaml
 therapie:
-  post_code: "10115"         # your postal code (5 km search radius)
+  post_code: "10115"         # your postal code
+  search_radius_km: 25       # search radius: 10, 25, 50, or 100 km
   therapy_form: 1            # 1 = Einzeltherapie, 2 = Gruppentherapie, 3 = Paar-/Familientherapie
   therapy_type: 2            # 1 = Analytische, 2 = Verhaltenstherapie, 3 = Tiefenpsychologisch, 4 = Systemische
   max_pages: 100             # how many pages of results to go through
 ```
+
+`search_radius_km` maps to therapie.de's `search_radius` URL parameter. The site currently accepts `10`, `25`, `50`, and `100` km. Unsupported values are rejected by Doctor Collector because therapie.de silently falls back to `10` km instead of returning an error.
 
 ### Filters
 
@@ -130,8 +133,11 @@ All examples below mount a `./data` folder so that output files are saved on you
 docker run --rm -v ./data:/app/data \
   -e CSV_FILE=/app/data/therapists.csv \
   -e THERAPIE_POST_CODE=10115 \
+  -e THERAPIE_SEARCH_RADIUS_KM=25 \
   kequach/doctor-collector python -m doctor_collector --collect
 ```
+
+`THERAPIE_SEARCH_RADIUS_KM` accepts the same values as `search_radius_km`: `10`, `25`, `50`, or `100`.
 
 **Step 2 — Review the results:**
 
@@ -156,6 +162,7 @@ docker run --rm -v ./data:/app/data \
   -e CSV_FILE=/app/data/therapists.csv \
   -e STATE_FILE=/app/data/.contacted_therapists.json \
   -e THERAPIE_POST_CODE=10115 \
+  -e THERAPIE_SEARCH_RADIUS_KM=25 \
   -e THERAPIE_THERAPY_FORM=1 \
   -e THERAPIE_THERAPY_TYPE=2 \
   -e CONTACT_SMTP_USER=you@gmail.com \

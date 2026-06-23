@@ -12,6 +12,7 @@ import asyncio
 import logging
 import re
 from typing import TYPE_CHECKING
+from urllib.parse import urlencode
 
 import httpx
 from bs4 import BeautifulSoup
@@ -60,11 +61,14 @@ class TherapieClient:
 
     def _build_start_url(self) -> str:
         t = self._config.therapie
-        return (
-            f"{_BASE_URL}/therapeutensuche/ergebnisse/"
-            f"?ort={t.post_code}&page={t.start_page}"
-            f"&therapieangebot={t.therapy_form}&verfahren={t.therapy_type}"
-        )
+        params = {
+            "ort": t.post_code,
+            "page": t.start_page,
+            "search_radius": t.search_radius_km,
+            "therapieangebot": t.therapy_form,
+            "verfahren": t.therapy_type,
+        }
+        return f"{_BASE_URL}/therapeutensuche/ergebnisse/?{urlencode(params)}"
 
     async def fetch_therapist_listings(self) -> list[TherapistProfile]:
         """Crawl all listing pages and extract full profiles."""

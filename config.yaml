@@ -1,7 +1,14 @@
 # therapie.de search parameters
 therapie:
-  # Postal code for the therapist search (5 km radius)
+  # Postal code for the therapist search
   post_code: ""
+
+  # Search radius in kilometers.
+  # Doctor Collector sends this to therapie.de as the `search_radius` query parameter.
+  # Valid values are: 10, 25, 50, 100.
+  # therapie.de silently falls back to 10 km for unsupported values, so this app
+  # rejects unsupported values during config validation.
+  search_radius_km: 10
 
   # Therapy form: 1 = Einzeltherapie, 2 = Gruppentherapie, 3 = Paar-/Familientherapie
   therapy_form: 1

@@ -116,7 +116,7 @@ class TherapieConfig(BaseModel):
     therapy_type: int = Field(default=2, ge=1)
     start_page: int = Field(default=1, ge=1)
     max_pages: int = Field(default=100, ge=1)
-    request_delay_seconds: float = Field(default=0.2, ge=0)
+    request_delay_seconds: float = Field(default=1.0, ge=0)
 
     @field_validator("search_radius_km")
     @classmethod

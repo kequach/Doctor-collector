@@ -24,9 +24,10 @@ therapie:
   # Maximum number of listing pages to crawl
   max_pages: 100
 
-  # Delay between HTTP requests (seconds). Profiles are fetched concurrently
-  # (up to 8 at a time), so this is per-request, not per-page.
-  request_delay_seconds: 0.2
+  # Minimum delay between starting HTTP requests (seconds).
+  # Increase this if therapie.de returns HTTP 429 Too Many Requests.
+  # The scraper also retries 429 responses and waits when therapie.de asks it to.
+  request_delay_seconds: 1.0
 
 # Therapist filters — exclude profiles whose type contains these keywords
 filters:

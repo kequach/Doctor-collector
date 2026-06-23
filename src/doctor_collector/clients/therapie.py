@@ -11,6 +11,8 @@ from __future__ import annotations
 import asyncio
 import logging
 import re
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from typing import TYPE_CHECKING
 from urllib.parse import urlencode
 
@@ -28,6 +30,13 @@ _BASE_URL = "https://www.therapie.de"
 _PROFILE_LINK_RE = re.compile(r"/profil/")
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 _MAX_CONCURRENT = 8
+_MAX_HTTP_RETRIES = 3
+_RATE_LIMIT_STATUS_CODE = 429
+_DEFAULT_RATE_LIMIT_DELAY_SECONDS = 60.0
+_MAX_RATE_LIMIT_DELAY_SECONDS = 300.0
+_TRANSIENT_STATUS_CODES = {500, 502, 503, 504}
+_TRANSIENT_RETRY_DELAY_SECONDS = 2.0
+_REQUEST_ERROR_RETRY_DELAY_SECONDS = 2.0
 
 
 def _decode_email(encoded: str) -> str:
@@ -37,6 +46,14 @@ def _decode_email(encoded: str) -> str:
     point is incremented by 1.  Reversing it is trivial.
     """
     return "".join(chr(ord(c) - 1) for c in encoded)
+
+
+class TherapieRateLimitError(RuntimeError):
+    """Raised when therapie.de keeps returning HTTP 429 after retries."""
+
+
+class TherapieRequestError(RuntimeError):
+    """Raised when a request keeps failing after retries."""
 
 
 class TherapieClient:
@@ -55,6 +72,10 @@ class TherapieClient:
             headers={"User-Agent": _USER_AGENT},
         )
         self._sem = asyncio.Semaphore(_MAX_CONCURRENT)
+        self._request_lock = asyncio.Lock()
+        self._rate_limit_lock = asyncio.Lock()
+        self._next_request_at = 0.0
+        self._rate_limited_until = 0.0
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -83,12 +104,32 @@ class TherapieClient:
                 profile_urls, next_url = await self._parse_listing_page(current_url)
                 logger.info("Found %d profiles on page %d", len(profile_urls), page_num)
 
-                profiles = await self._fetch_profiles_batch(profile_urls, cfg.request_delay_seconds)
+                profiles = await self._fetch_profiles_batch(profile_urls)
                 all_therapists.extend(profiles)
 
                 current_url = next_url
                 page_num += 1
 
+            except TherapieRateLimitError as exc:
+                logger.warning("Stopping crawl: %s", exc)
+                break
+            except httpx.HTTPStatusError as exc:
+                logger.warning(
+                    "Failed to crawl listing page %s: HTTP %d",
+                    current_url,
+                    exc.response.status_code,
+                )
+                break
+            except TherapieRequestError as exc:
+                logger.warning("Stopping crawl after request errors: %s", exc)
+                break
+            except httpx.RequestError as exc:
+                logger.warning(
+                    "Failed to crawl listing page %s: %s",
+                    current_url,
+                    self._format_request_error(exc),
+                )
+                break
             except Exception:
                 logger.exception("Failed to crawl listing page: %s", current_url)
                 break
@@ -96,17 +137,33 @@ class TherapieClient:
         logger.info("Crawling complete — %d profiles collected", len(all_therapists))
         return all_therapists
 
-    async def _fetch_profiles_batch(
-        self, urls: list[str], delay: float
-    ) -> list[TherapistProfile]:
+    async def _fetch_profiles_batch(self, urls: list[str]) -> list[TherapistProfile]:
         """Fetch multiple profile pages concurrently with a semaphore limit."""
 
         async def _limited(url: str) -> TherapistProfile | None:
             async with self._sem:
-                if delay > 0:
-                    await asyncio.sleep(delay)
                 try:
                     return await self._extract_profile(url)
+                except TherapieRateLimitError as exc:
+                    logger.warning("Skipping profile after rate limit: %s", exc)
+                    return None
+                except httpx.HTTPStatusError as exc:
+                    logger.warning(
+                        "Skipping profile %s after HTTP %d",
+                        url,
+                        exc.response.status_code,
+                    )
+                    return None
+                except httpx.RequestError as exc:
+                    logger.warning(
+                        "Skipping profile %s after request error: %s",
+                        url,
+                        self._format_request_error(exc),
+                    )
+                    return None
+                except TherapieRequestError as exc:
+                    logger.warning("Skipping profile after request errors: %s", exc)
+                    return None
                 except Exception:
                     logger.exception("Failed to extract profile: %s", url)
                     return None
@@ -119,8 +176,7 @@ class TherapieClient:
 
     async def _parse_listing_page(self, url: str) -> tuple[list[str], str | None]:
         """Fetch a listing page and return (profile_urls, next_page_url)."""
-        response = await self._http.get(url)
-        response.raise_for_status()
+        response = await self._get(url)
         soup = BeautifulSoup(response.content, "html.parser")
 
         profile_urls: list[str] = []
@@ -147,8 +203,7 @@ class TherapieClient:
 
     async def _extract_profile(self, profile_url: str) -> TherapistProfile:
         """Fetch a profile page and extract all fields from the HTML."""
-        response = await self._http.get(profile_url)
-        response.raise_for_status()
+        response = await self._get(profile_url)
         soup = BeautifulSoup(response.content, "html.parser")
 
         return TherapistProfile(
@@ -158,6 +213,133 @@ class TherapieClient:
             therapist_type=self._extract_type(soup),
             profile_url=profile_url,
         )
+
+    async def _get(self, url: str) -> httpx.Response:
+        """GET a URL with pacing, retrying, and therapie.de rate-limit handling."""
+        for attempt in range(1, _MAX_HTTP_RETRIES + 2):
+            await self._wait_for_rate_limit()
+            await self._wait_for_request_slot()
+
+            try:
+                response = await self._http.get(url)
+            except httpx.RequestError as exc:
+                if attempt <= _MAX_HTTP_RETRIES:
+                    delay = _REQUEST_ERROR_RETRY_DELAY_SECONDS * attempt
+                    logger.warning(
+                        "Request error for %s: %s; retrying in %.0f seconds (%d/%d)",
+                        url,
+                        self._format_request_error(exc),
+                        delay,
+                        attempt,
+                        _MAX_HTTP_RETRIES,
+                    )
+                    await asyncio.sleep(delay)
+                    continue
+
+                raise TherapieRequestError(
+                    f"request to {url} failed after {_MAX_HTTP_RETRIES} retries: "
+                    f"{self._format_request_error(exc)}"
+                ) from exc
+
+            if response.status_code == _RATE_LIMIT_STATUS_CODE:
+                delay = self._retry_after_seconds(response)
+                if delay is None:
+                    delay = self._rate_limit_delay_seconds(attempt)
+                await self._set_rate_limit(delay)
+
+                if attempt <= _MAX_HTTP_RETRIES:
+                    logger.warning(
+                        "therapie.de rate limit for %s; waiting %.0f seconds before retry %d/%d",
+                        url,
+                        delay,
+                        attempt,
+                        _MAX_HTTP_RETRIES,
+                    )
+                    continue
+
+                raise TherapieRateLimitError(
+                    f"therapie.de returned HTTP 429 for {url} after "
+                    f"{_MAX_HTTP_RETRIES} retries"
+                )
+
+            if (
+                response.status_code in _TRANSIENT_STATUS_CODES
+                and attempt <= _MAX_HTTP_RETRIES
+            ):
+                delay = _TRANSIENT_RETRY_DELAY_SECONDS * attempt
+                logger.warning(
+                    "Transient HTTP %d for %s; retrying in %.0f seconds (%d/%d)",
+                    response.status_code,
+                    url,
+                    delay,
+                    attempt,
+                    _MAX_HTTP_RETRIES,
+                )
+                await asyncio.sleep(delay)
+                continue
+
+            response.raise_for_status()
+            return response
+
+        raise RuntimeError("unreachable HTTP retry state")
+
+    async def _wait_for_request_slot(self) -> None:
+        delay = self._config.therapie.request_delay_seconds
+        if delay <= 0:
+            return
+
+        async with self._request_lock:
+            loop = asyncio.get_running_loop()
+            sleep_for = self._next_request_at - loop.time()
+            if sleep_for > 0:
+                await asyncio.sleep(sleep_for)
+            self._next_request_at = loop.time() + delay
+
+    async def _wait_for_rate_limit(self) -> None:
+        while True:
+            async with self._rate_limit_lock:
+                sleep_for = self._rate_limited_until - asyncio.get_running_loop().time()
+
+            if sleep_for <= 0:
+                return
+
+            await asyncio.sleep(sleep_for)
+
+    async def _set_rate_limit(self, delay: float) -> None:
+        async with self._rate_limit_lock:
+            loop = asyncio.get_running_loop()
+            self._rate_limited_until = max(self._rate_limited_until, loop.time() + delay)
+
+    @staticmethod
+    def _rate_limit_delay_seconds(attempt: int) -> float:
+        delay = _DEFAULT_RATE_LIMIT_DELAY_SECONDS * (2 ** (attempt - 1))
+        return min(delay, _MAX_RATE_LIMIT_DELAY_SECONDS)
+
+    @staticmethod
+    def _retry_after_seconds(response: httpx.Response) -> float | None:
+        raw = response.headers.get("Retry-After")
+        if not raw:
+            return None
+
+        try:
+            delay = float(raw)
+        except ValueError:
+            try:
+                retry_at = parsedate_to_datetime(raw)
+            except (TypeError, ValueError, IndexError, OverflowError):
+                return None
+            if retry_at.tzinfo is None:
+                retry_at = retry_at.replace(tzinfo=timezone.utc)
+            delay = (retry_at - datetime.now(timezone.utc)).total_seconds()
+
+        return min(max(delay, 0.0), _MAX_RATE_LIMIT_DELAY_SECONDS)
+
+    @staticmethod
+    def _format_request_error(exc: httpx.RequestError) -> str:
+        message = str(exc).strip()
+        if message:
+            return f"{type(exc).__name__}: {message}"
+        return type(exc).__name__
 
     @staticmethod
     def _extract_name(soup: BeautifulSoup) -> str:

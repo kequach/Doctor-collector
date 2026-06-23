@@ -74,6 +74,8 @@ therapie:
 
 `search_radius_km` maps to therapie.de's `search_radius` URL parameter. The site currently accepts `10`, `25`, `50`, and `100` km. Unsupported values are rejected by Doctor Collector because therapie.de silently falls back to `10` km instead of returning an error.
 
+If therapie.de returns `HTTP 429 Too Many Requests`, Doctor Collector waits and retries automatically. If it keeps happening, wait a few minutes before running again or increase `therapie.request_delay_seconds` in `config.yaml`. The default is `1.0`, meaning requests are started at least one second apart.
+
 ### Filters
 
 ```yaml

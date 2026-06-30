@@ -8,7 +8,7 @@ import logging
 import os
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 
 from doctor_collector.clients.therapie import TherapieClient
 from doctor_collector.models.therapist import CollectionResult, TherapistProfile
@@ -18,12 +18,37 @@ if TYPE_CHECKING:
 
 logger = logging.getLogger(__name__)
 
-_DEFAULT_STATE_PATH = Path(
-    os.environ.get("STATE_FILE", Path.cwd() / ".contacted_therapists.json"),
-)
-_DEFAULT_CSV_PATH = Path(os.environ.get("CSV_FILE", Path.cwd() / "therapists.csv"))
-
 _CSV_FIELDS = ["name", "email", "therapist_type", "website", "profile_url"]
+StopCheck = Callable[[], bool]
+StopWait = Callable[[float], bool]
+
+
+def get_default_csv_path() -> Path:
+    return Path(os.environ.get("CSV_FILE", Path.cwd() / "therapists.csv"))
+
+
+def get_default_state_path() -> Path:
+    return Path(os.environ.get("STATE_FILE", Path.cwd() / ".contacted_therapists.json"))
+
+
+def load_therapists_csv(path: Path) -> list[TherapistProfile]:
+    """Load therapist data from a CSV file."""
+    if not path.exists():
+        return []
+
+    therapists: list[TherapistProfile] = []
+    with path.open(encoding="utf-8") as f:
+        reader = csv.DictReader(f)
+        for row in reader:
+            therapists.append(TherapistProfile(
+                name=row.get("name", ""),
+                email=row.get("email") or None,
+                therapist_type=row.get("therapist_type", ""),
+                website=row.get("website") or None,
+                profile_url=row.get("profile_url", ""),
+            ))
+    logger.info("Loaded %d therapists from %s", len(therapists), path)
+    return therapists
 
 
 class TherapistCollector:
@@ -35,12 +60,19 @@ class TherapistCollector:
         *,
         state_file: Path | None = None,
         csv_file: Path | None = None,
+        stop_requested: StopCheck | None = None,
+        stop_wait: StopWait | None = None,
     ) -> None:
         self._config = config
-        self._client = TherapieClient(config)
+        self._client = TherapieClient(
+            config,
+            stop_requested=stop_requested,
+            stop_wait=stop_wait,
+        )
         self.last_result: CollectionResult | None = None
-        self._state_path = state_file or _DEFAULT_STATE_PATH
-        self._csv_path = csv_file or _DEFAULT_CSV_PATH
+        self.last_csv_saved = False
+        self._state_path = state_file or get_default_state_path()
+        self._csv_path = csv_file or get_default_csv_path()
         self._contacted_emails: set[str] = self._load_contacted()
 
     @property
@@ -103,21 +135,7 @@ class TherapistCollector:
 
     def load_csv(self) -> list[TherapistProfile]:
         """Load therapist data from the CSV file (for --contact without --collect)."""
-        if not self._csv_path.exists():
-            return []
-        therapists: list[TherapistProfile] = []
-        with self._csv_path.open(encoding="utf-8") as f:
-            reader = csv.DictReader(f)
-            for row in reader:
-                therapists.append(TherapistProfile(
-                    name=row.get("name", ""),
-                    email=row.get("email") or None,
-                    therapist_type=row.get("therapist_type", ""),
-                    website=row.get("website") or None,
-                    profile_url=row.get("profile_url", ""),
-                ))
-        logger.info("Loaded %d therapists from %s", len(therapists), self._csv_path)
-        return therapists
+        return load_therapists_csv(self._csv_path)
 
     # ------------------------------------------------------------------
     # Collection
@@ -125,6 +143,7 @@ class TherapistCollector:
 
     async def collect(self) -> CollectionResult:
         """Run a full collection: scrape, filter, save to CSV."""
+        self.last_csv_saved = False
         if not self._config.therapie.post_code:
             logger.warning("No post_code configured — skipping collection")
             result = CollectionResult()
@@ -132,6 +151,7 @@ class TherapistCollector:
             return result
 
         all_profiles = await self._client.fetch_therapist_listings()
+        crawl_completed = getattr(self._client, "last_crawl_completed", True)
         logger.info("Scraped %d total profiles", len(all_profiles))
 
         matching = self._apply_filters(all_profiles)
@@ -149,8 +169,13 @@ class TherapistCollector:
             new_therapists=new_therapists,
         )
 
-        if matching:
+        if crawl_completed:
             self._save_csv(matching)
+            self.last_csv_saved = True
+        else:
+            logger.warning(
+                "Collection did not complete; leaving existing CSV unchanged"
+            )
 
         self.last_result = result
         return result

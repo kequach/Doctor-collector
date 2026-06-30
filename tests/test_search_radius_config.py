@@ -35,6 +35,11 @@ def test_rejects_unsupported_search_radius():
         TherapieConfig(search_radius_km=20)
 
 
+def test_rejects_zero_request_delay():
+    with pytest.raises(ValidationError, match="greater than or equal to 0.1"):
+        TherapieConfig(request_delay_seconds=0)
+
+
 def test_start_url_includes_search_radius():
     from doctor_collector.clients.therapie import TherapieClient
 

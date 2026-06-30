@@ -1,9 +1,10 @@
 """Async HTTP client for therapie.de — no browser automation required.
 
 The email address on each profile page is stored in a ``data-contact-email``
-attribute on the contact button, obfuscated with a simple Caesar cipher
-(each character shifted by +1).  We decode it directly from the HTML
-instead of clicking the button with Selenium.
+attribute on the contact button, obfuscated with a simple Caesar cipher.
+Letters and digits wrap within their ranges, while punctuation is shifted by
+one code point.  We decode it directly from the HTML instead of clicking the
+button with Selenium.
 """
 
 from __future__ import annotations
@@ -13,7 +14,7 @@ import logging
 import re
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Callable
 from urllib.parse import urlencode
 
 import httpx
@@ -28,6 +29,7 @@ logger = logging.getLogger(__name__)
 
 _BASE_URL = "https://www.therapie.de"
 _PROFILE_LINK_RE = re.compile(r"/profil/")
+_EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 _USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36"
 _MAX_CONCURRENT = 8
 _MAX_HTTP_RETRIES = 3
@@ -37,15 +39,56 @@ _MAX_RATE_LIMIT_DELAY_SECONDS = 300.0
 _TRANSIENT_STATUS_CODES = {500, 502, 503, 504}
 _TRANSIENT_RETRY_DELAY_SECONDS = 2.0
 _REQUEST_ERROR_RETRY_DELAY_SECONDS = 2.0
+StopCheck = Callable[[], bool]
+StopWait = Callable[[float], bool]
 
 
 def _decode_email(encoded: str) -> str:
     """Decode the obfuscated email from ``data-contact-email``.
 
-    therapie.de uses a character-shift cipher where each character's code
-    point is incremented by 1.  Reversing it is trivial.
+    ``@`` is encoded as ``A``, which collides with wrapped ``Z``.  Prefer the
+    last plausible ``A`` separator so uppercase ``Z`` in local parts still
+    round-trips.
     """
-    return "".join(chr(ord(c) - 1) for c in encoded)
+    separator_indexes = [index for index, char in enumerate(encoded) if char == "A"]
+    if not separator_indexes:
+        return _decode_email_with_separator(encoded, None)
+
+    fallback = _decode_email_with_separator(encoded, separator_indexes[-1])
+    for separator_index in reversed(separator_indexes):
+        decoded = _decode_email_with_separator(encoded, separator_index)
+        if _EMAIL_RE.match(decoded):
+            return decoded
+    return fallback
+
+
+def _decode_email_with_separator(encoded: str, separator_index: int | None) -> str:
+    return "".join(
+        "@"
+        if index == separator_index
+        else _decode_email_char(char)
+        for index, char in enumerate(encoded)
+    )
+
+
+def _decode_email_char(char: str) -> str:
+    if char == "a":
+        return "z"
+    if "b" <= char <= "z":
+        return chr(ord(char) - 1)
+    if char == "A":
+        return "Z"
+    if "B" <= char <= "Z":
+        return chr(ord(char) - 1)
+    if char == "0":
+        return "9"
+    if "1" <= char <= "9":
+        return chr(ord(char) - 1)
+    return chr(ord(char) - 1)
+
+
+def _never_stop() -> bool:
+    return False
 
 
 class TherapieRateLimitError(RuntimeError):
@@ -56,6 +99,10 @@ class TherapieRequestError(RuntimeError):
     """Raised when a request keeps failing after retries."""
 
 
+class TherapieStopRequested(RuntimeError):
+    """Raised internally when the user stops a running crawl."""
+
+
 class TherapieClient:
     """Scrapes therapist listings and profiles from therapie.de.
 
@@ -64,7 +111,13 @@ class TherapieClient:
     Profile pages are fetched concurrently (up to 8 at a time) for speed.
     """
 
-    def __init__(self, config: AppConfig) -> None:
+    def __init__(
+        self,
+        config: AppConfig,
+        *,
+        stop_requested: StopCheck | None = None,
+        stop_wait: StopWait | None = None,
+    ) -> None:
         self._config = config
         self._http = httpx.AsyncClient(
             timeout=30,
@@ -76,6 +129,9 @@ class TherapieClient:
         self._rate_limit_lock = asyncio.Lock()
         self._next_request_at = 0.0
         self._rate_limited_until = 0.0
+        self.last_crawl_completed = False
+        self._stop_requested = stop_requested or _never_stop
+        self._stop_wait = stop_wait
 
     async def aclose(self) -> None:
         await self._http.aclose()
@@ -94,24 +150,40 @@ class TherapieClient:
     async def fetch_therapist_listings(self) -> list[TherapistProfile]:
         """Crawl all listing pages and extract full profiles."""
         cfg = self._config.therapie
+        self.last_crawl_completed = False
         all_therapists: list[TherapistProfile] = []
         current_url: str | None = self._build_start_url()
         page_num = 1
+        skipped_profiles = False
 
         while current_url and page_num <= cfg.max_pages:
+            if self._stop_requested():
+                logger.info("Stopping crawl: stop requested by user")
+                break
+
             logger.info("Crawling listing page %d: %s", page_num, current_url)
             try:
                 profile_urls, next_url = await self._parse_listing_page(current_url)
                 logger.info("Found %d profiles on page %d", len(profile_urls), page_num)
+                if not profile_urls and next_url is None and not all_therapists:
+                    skipped_profiles = True
 
                 profiles = await self._fetch_profiles_batch(profile_urls)
+                if len(profiles) < len(profile_urls):
+                    skipped_profiles = True
                 all_therapists.extend(profiles)
 
                 current_url = next_url
                 page_num += 1
+                if self._stop_requested():
+                    logger.info("Stopping crawl: stop requested by user")
+                    break
 
             except TherapieRateLimitError as exc:
                 logger.warning("Stopping crawl: %s", exc)
+                break
+            except TherapieStopRequested:
+                logger.info("Stopping crawl: stop requested by user")
                 break
             except httpx.HTTPStatusError as exc:
                 logger.warning(
@@ -133,17 +205,29 @@ class TherapieClient:
             except Exception:
                 logger.exception("Failed to crawl listing page: %s", current_url)
                 break
+        else:
+            self.last_crawl_completed = not skipped_profiles
 
         logger.info("Crawling complete — %d profiles collected", len(all_therapists))
         return all_therapists
 
     async def _fetch_profiles_batch(self, urls: list[str]) -> list[TherapistProfile]:
         """Fetch multiple profile pages concurrently with a semaphore limit."""
+        if self._stop_requested():
+            return []
 
         async def _limited(url: str) -> TherapistProfile | None:
+            if self._stop_requested():
+                return None
+
             async with self._sem:
+                if self._stop_requested():
+                    return None
+
                 try:
                     return await self._extract_profile(url)
+                except TherapieStopRequested:
+                    return None
                 except TherapieRateLimitError as exc:
                     logger.warning("Skipping profile after rate limit: %s", exc)
                     return None
@@ -217,8 +301,11 @@ class TherapieClient:
     async def _get(self, url: str) -> httpx.Response:
         """GET a URL with pacing, retrying, and therapie.de rate-limit handling."""
         for attempt in range(1, _MAX_HTTP_RETRIES + 2):
-            await self._wait_for_rate_limit()
-            await self._wait_for_request_slot()
+            if await self._wait_for_rate_limit():
+                raise TherapieStopRequested()
+            if await self._wait_for_request_slot():
+                raise TherapieStopRequested()
+            self._raise_if_stopped()
 
             try:
                 response = await self._http.get(url)
@@ -233,7 +320,8 @@ class TherapieClient:
                         attempt,
                         _MAX_HTTP_RETRIES,
                     )
-                    await asyncio.sleep(delay)
+                    if await self._sleep_or_stop(delay):
+                        raise TherapieStopRequested()
                     continue
 
                 raise TherapieRequestError(
@@ -275,7 +363,8 @@ class TherapieClient:
                     attempt,
                     _MAX_HTTP_RETRIES,
                 )
-                await asyncio.sleep(delay)
+                if await self._sleep_or_stop(delay):
+                    raise TherapieStopRequested()
                 continue
 
             response.raise_for_status()
@@ -283,27 +372,36 @@ class TherapieClient:
 
         raise RuntimeError("unreachable HTTP retry state")
 
-    async def _wait_for_request_slot(self) -> None:
+    async def _wait_for_request_slot(self) -> bool:
         delay = self._config.therapie.request_delay_seconds
         if delay <= 0:
-            return
+            return self._stop_requested()
 
         async with self._request_lock:
+            if self._stop_requested():
+                return True
+
             loop = asyncio.get_running_loop()
             sleep_for = self._next_request_at - loop.time()
             if sleep_for > 0:
-                await asyncio.sleep(sleep_for)
+                if await self._sleep_or_stop(sleep_for):
+                    return True
             self._next_request_at = loop.time() + delay
+            return False
 
-    async def _wait_for_rate_limit(self) -> None:
+    async def _wait_for_rate_limit(self) -> bool:
         while True:
+            if self._stop_requested():
+                return True
+
             async with self._rate_limit_lock:
                 sleep_for = self._rate_limited_until - asyncio.get_running_loop().time()
 
             if sleep_for <= 0:
-                return
+                return False
 
-            await asyncio.sleep(sleep_for)
+            if await self._sleep_or_stop(sleep_for):
+                return True
 
     async def _set_rate_limit(self, delay: float) -> None:
         async with self._rate_limit_lock:
@@ -314,6 +412,20 @@ class TherapieClient:
     def _rate_limit_delay_seconds(attempt: int) -> float:
         delay = _DEFAULT_RATE_LIMIT_DELAY_SECONDS * (2 ** (attempt - 1))
         return min(delay, _MAX_RATE_LIMIT_DELAY_SECONDS)
+
+    def _raise_if_stopped(self) -> None:
+        if self._stop_requested():
+            raise TherapieStopRequested()
+
+    async def _sleep_or_stop(self, delay: float) -> bool:
+        if delay <= 0:
+            return self._stop_requested()
+        if self._stop_requested():
+            return True
+        if self._stop_wait is None:
+            await asyncio.sleep(delay)
+            return self._stop_requested()
+        return await asyncio.to_thread(self._stop_wait, delay)
 
     @staticmethod
     def _retry_after_seconds(response: httpx.Response) -> float | None:

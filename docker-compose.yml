@@ -8,7 +8,6 @@ services:
     environment:
       - STATE_FILE=/app/data/.contacted_therapists.json
       - CSV_FILE=/app/data/therapists.csv
-    # Default: collect only. Override command to contact or do both:
+    # Default: collect only. Review ./data/therapists.csv before contacting:
     #   docker compose run --rm doctor-collector python -m doctor_collector --contact
-    #   docker compose run --rm doctor-collector python -m doctor_collector --collect --contact
     command: ["python", "-m", "doctor_collector", "--collect"]

@@ -15,6 +15,7 @@ class TherapistProfile(BaseModel):
     email: str | None = None
     therapist_type: str = ""
     profile_url: str = ""
+    excluded: bool = False
 
 
 class CollectionResult(BaseModel):

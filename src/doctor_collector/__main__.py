@@ -102,7 +102,7 @@ async def _run(config_path: str | None, *, collect: bool, contact: bool) -> None
         if contact:
             result = await contact_collected_therapists(config_path)
             if result.to_contact == 0:
-                print("  All therapists have already been contacted.")
+                print("  No active, new therapist email addresses to contact.")
             else:
                 print(
                     f"  {result.to_contact} therapist(s) to contact "

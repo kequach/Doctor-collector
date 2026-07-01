@@ -2,9 +2,7 @@
 
 from __future__ import annotations
 
-import csv
 import hashlib
-import io
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
@@ -12,7 +10,7 @@ from typing import Callable
 from doctor_collector.config import AppConfig, load_config
 from doctor_collector.models.therapist import TherapistProfile
 from doctor_collector.notifications.console import ConsoleNotifier
-from doctor_collector.services.collector import TherapistCollector
+from doctor_collector.services.collector import TherapistCollector, parse_therapists_csv
 from doctor_collector.services.contactor import TherapistContactor
 
 
@@ -110,7 +108,10 @@ async def contact_collected_therapists(
             raise WorkflowError("No therapist data found - run with --collect first")
 
         already_contacted = collector.contacted_emails
-        to_contact = [t for t in therapists if t.email and t.email not in already_contacted]
+        to_contact = [
+            t for t in therapists
+            if t.email and not t.excluded and t.email not in already_contacted
+        ]
 
         if not to_contact:
             return ContactSummary(
@@ -146,15 +147,4 @@ def _load_reviewed_csv(path: Path, expected_signature: str) -> list[TherapistPro
     if actual_signature != expected_signature:
         raise WorkflowError("CSV changed after review - please review the current CSV again")
 
-    text = data.decode("utf-8")
-    reader = csv.DictReader(io.StringIO(text))
-    therapists: list[TherapistProfile] = []
-    for row in reader:
-        therapists.append(TherapistProfile(
-            name=row.get("name", ""),
-            email=row.get("email") or None,
-            therapist_type=row.get("therapist_type", ""),
-            website=row.get("website") or None,
-            profile_url=row.get("profile_url", ""),
-        ))
-    return therapists
+    return parse_therapists_csv(data.decode("utf-8"))

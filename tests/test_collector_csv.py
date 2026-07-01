@@ -6,7 +6,11 @@ import pytest
 
 from doctor_collector.config import AppConfig, TherapieConfig
 from doctor_collector.models.therapist import TherapistProfile
-from doctor_collector.services.collector import TherapistCollector
+from doctor_collector.services.collector import (
+    TherapistCollector,
+    load_therapists_csv,
+    save_therapists_csv,
+)
 
 
 @pytest.mark.asyncio
@@ -43,8 +47,78 @@ async def test_collect_overwrites_existing_csv_when_no_profiles_match(tmp_path):
     assert result.total_matching == 0
     assert collector.last_csv_saved is True
     assert csv_path.read_text(encoding="utf-8") == (
-        "name,email,therapist_type,website,profile_url\n"
+        "name,email,therapist_type,website,profile_url,excluded\n"
     )
+
+
+def test_load_csv_defaults_missing_excluded_column_to_active(tmp_path):
+    csv_path = tmp_path / "therapists.csv"
+    csv_path.write_text(
+        "name,email,therapist_type,website,profile_url\n"
+        "Active,active@example.com,Type,,https://example.test/active\n",
+        encoding="utf-8",
+    )
+
+    [therapist] = load_therapists_csv(csv_path)
+
+    assert therapist.email == "active@example.com"
+    assert therapist.excluded is False
+
+
+def test_save_and_load_csv_preserves_excluded_rows(tmp_path):
+    csv_path = tmp_path / "therapists.csv"
+
+    save_therapists_csv(
+        csv_path,
+        [
+            TherapistProfile(
+                name="Disabled",
+                email="disabled@example.com",
+                therapist_type="Type",
+                profile_url="https://example.test/disabled",
+                excluded=True,
+            ),
+        ],
+    )
+
+    text = csv_path.read_text(encoding="utf-8")
+    [therapist] = load_therapists_csv(csv_path)
+
+    assert text == (
+        "name,email,therapist_type,website,profile_url,excluded\n"
+        "Disabled,disabled@example.com,Type,,https://example.test/disabled,yes\n"
+    )
+    assert therapist.excluded is True
+
+
+def test_save_csv_keeps_existing_file_when_atomic_replace_fails(tmp_path, monkeypatch):
+    csv_path = tmp_path / "therapists.csv"
+    original = (
+        "name,email,therapist_type,website,profile_url\n"
+        "Original,original@example.com,Type,,https://example.test/original\n"
+    )
+    csv_path.write_text(original, encoding="utf-8")
+
+    def fail_replace(_source, _target):
+        raise OSError("replace failed")
+
+    monkeypatch.setattr("doctor_collector.services.collector.os.replace", fail_replace)
+
+    with pytest.raises(OSError, match="replace failed"):
+        save_therapists_csv(
+            csv_path,
+            [
+                TherapistProfile(
+                    name="New",
+                    email="new@example.com",
+                    therapist_type="Type",
+                    profile_url="https://example.test/new",
+                ),
+            ],
+        )
+
+    assert csv_path.read_text(encoding="utf-8") == original
+    assert not list(tmp_path.glob(".therapists.csv.*.tmp"))
 
 
 @pytest.mark.asyncio

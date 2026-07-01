@@ -95,8 +95,8 @@ python -m doctor_collector --web
 Open [http://127.0.0.1:8000/](http://127.0.0.1:8000/). The German page shows
 form fields for search settings, filter keywords, email text, and SMTP settings.
 It validates changes before saving them to `config.yaml`, displays the current
-CSV file path and rows, and has a button to copy all collected email addresses
-comma-separated. During collection, it shows live activity updates and a
+CSV file path and rows, and has a button to copy active collected email
+addresses comma-separated. During collection, it shows live activity updates and a
 running progress indicator, including how many profiles have been read so far.
 You can stop an in-progress collection from the page; rate-limit and request
 delay waits wake up promptly, the current request batch finishes cleanly, and
@@ -113,6 +113,8 @@ Sending emails from the web UI is optional. The `E-Mails senden` button stays
 disabled until you check `CSV geprüft`, keeping the same safe workflow as the
 terminal commands: collect first, review the CSV/table, then contact. You can
 also copy the email addresses and send from your own mail program instead.
+Rows can be marked inactive or removed during review; inactive rows stay in the
+CSV with `excluded=yes` and are skipped by both copy and contact actions.
 
 The web UI uses the values saved in `config.yaml`. Direct environment variable
 overrides are mainly for terminal and Docker runs. String `${ENV_VAR}`

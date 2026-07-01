@@ -29,7 +29,12 @@ from doctor_collector.config import (
     save_config_text,
 )
 from doctor_collector.models.therapist import TherapistProfile
-from doctor_collector.services.collector import get_default_csv_path, load_therapists_csv
+from doctor_collector.services.collector import (
+    get_default_csv_path,
+    load_therapists_csv,
+    load_therapists_csv_rows,
+    save_therapists_csv_rows,
+)
 from doctor_collector.workflow import (
     WorkflowError,
     collect_therapists,
@@ -387,7 +392,7 @@ class DoctorCollectorWebApp:
                 )
             )
             if result.to_contact == 0:
-                message = "Alle Einträge mit E-Mail wurden bereits kontaktiert."
+                message = "Keine aktiven, neuen E-Mail-Adressen zu kontaktieren."
             else:
                 message = f"{result.contacted} E-Mail(s) erfolgreich gesendet."
             return {
@@ -408,6 +413,41 @@ class DoctorCollectorWebApp:
     def therapists_payload(self) -> dict[str, Any]:
         return self._therapists_payload()
 
+    def set_therapist_excluded(
+        self,
+        *,
+        row_index: int,
+        excluded: bool,
+        expected_csv_signature: str | None,
+    ) -> dict[str, Any]:
+        _require_idle_job(self.jobs.snapshot())
+        csv_path = get_default_csv_path()
+        _require_current_csv_signature(csv_path, expected_csv_signature)
+        fieldnames, rows = load_therapists_csv_rows(csv_path)
+        if row_index < 0 or row_index >= len(rows):
+            raise WorkflowError("CSV row no longer exists - please refresh the table.")
+
+        rows[row_index]["excluded"] = "yes" if excluded else ""
+        save_therapists_csv_rows(csv_path, fieldnames, rows)
+        return self._therapists_payload()
+
+    def remove_therapist(
+        self,
+        *,
+        row_index: int,
+        expected_csv_signature: str | None,
+    ) -> dict[str, Any]:
+        _require_idle_job(self.jobs.snapshot())
+        csv_path = get_default_csv_path()
+        _require_current_csv_signature(csv_path, expected_csv_signature)
+        fieldnames, rows = load_therapists_csv_rows(csv_path)
+        if row_index < 0 or row_index >= len(rows):
+            raise WorkflowError("CSV row no longer exists - please refresh the table.")
+
+        del rows[row_index]
+        save_therapists_csv_rows(csv_path, fieldnames, rows)
+        return self._therapists_payload()
+
     def _therapists_payload(self) -> dict[str, Any]:
         csv_path = get_default_csv_path()
         therapists = load_therapists_csv(csv_path)
@@ -415,8 +455,10 @@ class DoctorCollectorWebApp:
             "csv_path": str(csv_path),
             "csv_signature": _csv_signature(csv_path),
             "count": len(therapists),
-            "contactable": sum(1 for t in therapists if t.email),
-            "rows": [_therapist_payload(t) for t in therapists],
+            "contactable": sum(1 for t in therapists if t.email and not t.excluded),
+            "excluded": sum(1 for t in therapists if t.excluded),
+            "emails": _active_email_addresses(therapists),
+            "rows": [_therapist_payload(index, t) for index, t in enumerate(therapists)],
         }
 
     def render_index(self) -> str:
@@ -439,6 +481,7 @@ class DoctorCollectorWebApp:
             therapists=therapists["rows"],
             therapist_count=int(therapists["count"]),
             contactable_count=int(therapists["contactable"]),
+            copy_emails=list(therapists["emails"]),
             job=job,
             csrf_token=self.csrf_token,
         )
@@ -529,6 +572,19 @@ class DoctorCollectorWebApp:
                         stopped, state = app.stop_collect()
                         status = HTTPStatus.ACCEPTED if stopped else HTTPStatus.CONFLICT
                         self._send_json({"ok": stopped, "job": state}, status)
+                    elif path == "/api/therapists/exclude":
+                        therapists = app.set_therapist_excluded(
+                            row_index=_parse_row_index(data.get("row_index")),
+                            excluded=_form_bool(data.get("excluded")),
+                            expected_csv_signature=_optional_str(data.get("csv_signature")),
+                        )
+                        self._send_json({"ok": True, "therapists": therapists})
+                    elif path == "/api/therapists/remove":
+                        therapists = app.remove_therapist(
+                            row_index=_parse_row_index(data.get("row_index")),
+                            expected_csv_signature=_optional_str(data.get("csv_signature")),
+                        )
+                        self._send_json({"ok": True, "therapists": therapists})
                     elif path == "/api/contact":
                         confirmed = str(data.get("confirm", "")).lower() in {
                             "1",
@@ -684,14 +740,27 @@ def run_web(
         server.server_close()
 
 
-def _therapist_payload(therapist: TherapistProfile) -> dict[str, str]:
+def _therapist_payload(index: int, therapist: TherapistProfile) -> dict[str, Any]:
     return {
+        "index": index,
         "name": therapist.name,
         "email": therapist.email or "",
         "therapist_type": therapist.therapist_type,
         "website": therapist.website or "",
         "profile_url": therapist.profile_url,
+        "excluded": therapist.excluded,
     }
+
+
+def _active_email_addresses(therapists: list[TherapistProfile]) -> list[str]:
+    emails: list[str] = []
+    seen: set[str] = set()
+    for therapist in therapists:
+        if therapist.excluded or not therapist.email or therapist.email in seen:
+            continue
+        seen.add(therapist.email)
+        emails.append(therapist.email)
+    return emails
 
 
 def _is_loopback_host(host: str) -> bool:
@@ -772,6 +841,37 @@ def _csv_signature(path: Path) -> str:
     return f"sha256:{digest.hexdigest()}"
 
 
+def _require_current_csv_signature(path: Path, expected_signature: str | None) -> None:
+    if expected_signature != _csv_signature(path):
+        raise WorkflowError("CSV changed - please refresh the table before editing rows.")
+
+
+def _require_idle_job(job: dict[str, Any]) -> None:
+    if job.get("status") == "running":
+        raise WorkflowError("Please wait for the current job to finish before editing rows.")
+
+
+def _parse_row_index(value: object) -> int:
+    try:
+        row_index = int(str(value))
+    except (TypeError, ValueError) as exc:
+        raise WorkflowError("CSV row index is invalid.") from exc
+
+    if row_index < 0:
+        raise WorkflowError("CSV row index is invalid.")
+    return row_index
+
+
+def _form_bool(value: object) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "on", "yes"}
+
+
+def _optional_str(value: object) -> str | None:
+    if value is None:
+        return None
+    return str(value)
+
+
 def _escape(value: object) -> str:
     return html.escape(str(value), quote=True)
 
@@ -783,16 +883,17 @@ def _render_index(
     config_error: str,
     csv_path: str,
     csv_signature: str,
-    therapists: list[dict[str, str]],
+    therapists: list[dict[str, Any]],
     therapist_count: int,
     contactable_count: int,
+    copy_emails: list[str],
     job: dict[str, Any],
     csrf_token: str,
 ) -> str:
     rows = "\n".join(_render_row(row) for row in therapists)
     if not rows:
         rows = (
-            '<tr class="empty-row"><td colspan="5">'
+            '<tr class="empty-row"><td colspan="7">'
             "Noch keine gesammelten Einträge."
             "</td></tr>"
         )
@@ -801,6 +902,7 @@ def _render_index(
     copy_disabled = " disabled" if contactable_count == 0 else ""
     config_json = json.dumps(config_data, ensure_ascii=False).replace("</", "<\\/")
     job_json = json.dumps(job, ensure_ascii=False).replace("</", "<\\/")
+    copy_emails_json = json.dumps(copy_emails, ensure_ascii=False).replace("</", "<\\/")
     job_events = _render_job_events(job)
     job_profile_count = _job_profile_count(job)
     progress_hidden = "" if job.get("status") == "running" else " hidden"
@@ -978,7 +1080,7 @@ def _render_index(
         <div>
           <h2>Gesammelte Einträge</h2>
           <p id="table-count" data-csv-signature="{_escape(csv_signature)}">
-            {therapist_count} Einträge, {contactable_count} mit E-Mail
+            {therapist_count} Einträge, {contactable_count} mit aktiver E-Mail
           </p>
         </div>
         <div class="section-actions">
@@ -990,13 +1092,15 @@ def _render_index(
       </div>
       <p class="note table-note">
         Die gesammelten Daten werden in der oben angezeigten CSV-Datei gespeichert.
-        Kopieren fügt alle E-Mail-Adressen kommagetrennt in die Zwischenablage.
+        Kopieren fügt nur aktive E-Mail-Adressen kommagetrennt in die Zwischenablage.
       </p>
       <p id="copy-emails-status" class="copy-status" aria-live="polite"></p>
       <div class="table-wrap">
         <table>
           <thead>
             <tr>
+              <th>Aktiv</th>
+              <th>Entfernen</th>
               <th>Name</th>
               <th>E-Mail</th>
               <th>Typ</th>
@@ -1082,6 +1186,7 @@ def _render_index(
   <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
   <script type="application/json" id="config-data">{config_json}</script>
   <script type="application/json" id="job-data">{job_json}</script>
+  <script type="application/json" id="copy-emails-data">{copy_emails_json}</script>
   <script src="/assets/app.js?v={_ASSET_VERSION}"></script>
 </body>
 </html>
@@ -1120,8 +1225,25 @@ def _render_job_events(job: dict[str, Any]) -> str:
     return "\n          ".join(rendered)
 
 
-def _render_row(row: dict[str, str]) -> str:
-    return f"""<tr>
+def _render_row(row: dict[str, Any]) -> str:
+    excluded = bool(row["excluded"])
+    row_class = ' class="is-excluded"' if excluded else ""
+    checked = "" if excluded else " checked"
+    row_attrs = (
+        f'data-row-index="{_escape(row["index"])}" '
+        f'data-email="{_escape(row["email"])}" '
+        f'data-excluded="{str(excluded).lower()}"'
+    )
+    return f"""<tr{row_class} {row_attrs}>
+  <td class="row-actions">
+    <label class="row-toggle">
+      <input type="checkbox" data-row-action="toggle-excluded"{checked}>
+      <span>Aktiv</span>
+    </label>
+  </td>
+  <td class="row-remove-cell">
+    <button class="row-remove" type="button" data-row-action="remove">Entfernen</button>
+  </td>
   <td>{_escape(row["name"])}</td>
   <td>{_escape(row["email"])}</td>
   <td>{_escape(row["therapist_type"])}</td>
@@ -1673,7 +1795,7 @@ dd {
 
 table {
   width: 100%;
-  min-width: 860px;
+  min-width: 960px;
   border-collapse: collapse;
 }
 
@@ -1693,6 +1815,43 @@ th {
 
 td {
   overflow-wrap: anywhere;
+}
+
+.row-actions {
+  width: 88px;
+}
+
+.row-remove-cell {
+  width: 112px;
+}
+
+.row-toggle {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 700;
+  color: var(--text);
+}
+
+.row-toggle input {
+  width: auto;
+  flex: 0 0 auto;
+}
+
+.row-remove {
+  padding: 6px 8px;
+  border-color: #f0c7c0;
+  color: #9f2a1d;
+  background: #fff7f5;
+}
+
+.is-excluded {
+  color: var(--muted);
+  background: #fafafa;
+}
+
+.is-excluded a {
+  color: var(--muted);
 }
 
 .empty-row td {
@@ -1760,6 +1919,7 @@ const csrfToken = document.querySelector('meta[name="doctor-collector-token"]').
 let configData = JSON.parse(document.querySelector("#config-data").textContent);
 let initialJob = JSON.parse(document.querySelector("#job-data").textContent);
 let latestJob = initialJob;
+let copyableEmails = JSON.parse(document.querySelector("#copy-emails-data").textContent);
 let excludeTypes = [];
 let pollTimer = null;
 let currentCsvSignature = tableCount.dataset.csvSignature || null;
@@ -1835,6 +1995,9 @@ function setBusy(isBusy) {
   stopCollectButton.hidden = !runningCollect;
   stopCollectButton.disabled = !runningCollect || stopRequested;
   contactButton.disabled = isBusy || !confirmContact.checked;
+  for (const control of rowBody.querySelectorAll("button, input")) {
+    control.disabled = isBusy;
+  }
 }
 
 function clearCsvReview() {
@@ -2041,18 +2204,7 @@ function notifyJobTransition(previousStatus, job) {
 }
 
 function collectedEmails() {
-  const emails = [];
-  for (const row of rowBody.querySelectorAll("tr")) {
-    const cells = row.querySelectorAll("td");
-    if (cells.length < 2) {
-      continue;
-    }
-    const email = cells[1].textContent.trim();
-    if (email) {
-      emails.push(email);
-    }
-  }
-  return Array.from(new Set(emails));
+  return Array.from(new Set(copyableEmails.filter((email) => email)));
 }
 
 function updateCopyButton() {
@@ -2064,8 +2216,10 @@ function setRows(payload) {
     clearCsvReview();
   }
   currentCsvSignature = payload.csv_signature;
+  copyableEmails = Array.isArray(payload.emails) ? payload.emails.slice() : [];
 
-  tableCount.textContent = `${payload.count} Einträge, ${payload.contactable} mit E-Mail`;
+  tableCount.textContent =
+    `${payload.count} Einträge, ${payload.contactable} mit aktiver E-Mail`;
   csvPath.textContent = payload.csv_path;
   rowBody.replaceChildren();
   copyEmailsStatus.textContent = "";
@@ -2074,7 +2228,7 @@ function setRows(payload) {
     const tr = document.createElement("tr");
     tr.className = "empty-row";
     const td = document.createElement("td");
-    td.colSpan = 5;
+    td.colSpan = 7;
     td.textContent = "Noch keine gesammelten Einträge.";
     tr.append(td);
     rowBody.append(tr);
@@ -2084,6 +2238,12 @@ function setRows(payload) {
 
   for (const row of payload.rows) {
     const tr = document.createElement("tr");
+    tr.dataset.rowIndex = row.index;
+    tr.dataset.email = row.email || "";
+    tr.dataset.excluded = row.excluded ? "true" : "false";
+    tr.classList.toggle("is-excluded", Boolean(row.excluded));
+    addControlCell(tr, row);
+    addRemoveCell(tr);
     addCell(tr, row.name);
     addCell(tr, row.email);
     addCell(tr, row.therapist_type);
@@ -2092,6 +2252,36 @@ function setRows(payload) {
     rowBody.append(tr);
   }
   updateCopyButton();
+  setBusy(latestJob.status === "running");
+}
+
+function addControlCell(tr, row) {
+  const td = document.createElement("td");
+  td.className = "row-actions";
+
+  const label = document.createElement("label");
+  label.className = "row-toggle";
+  const checkbox = document.createElement("input");
+  checkbox.type = "checkbox";
+  checkbox.checked = !row.excluded;
+  checkbox.dataset.rowAction = "toggle-excluded";
+  const text = document.createElement("span");
+  text.textContent = "Aktiv";
+  label.append(checkbox, text);
+  td.append(label);
+  tr.append(td);
+}
+
+function addRemoveCell(tr) {
+  const td = document.createElement("td");
+  td.className = "row-remove-cell";
+  const remove = document.createElement("button");
+  remove.type = "button";
+  remove.className = "row-remove";
+  remove.dataset.rowAction = "remove";
+  remove.textContent = "Entfernen";
+  td.append(remove);
+  tr.append(td);
 }
 
 function addCell(tr, val) {
@@ -2113,6 +2303,55 @@ function addLinkCell(tr, val) {
     td.textContent = val;
   }
   tr.append(td);
+}
+
+async function updateRowExclusion(rowIndex, excluded) {
+  setBusy(true);
+  try {
+    const data = await postJson("/api/therapists/exclude", {
+      row_index: rowIndex,
+      excluded,
+      csv_signature: currentCsvSignature,
+    });
+    setRows(data.therapists);
+    showToast(excluded ? "Eintrag deaktiviert" : "Eintrag aktiviert");
+  } catch (error) {
+    showErrorToast("Eintrag konnte nicht geaendert werden", error);
+    await refreshStatus();
+  } finally {
+    setBusy(latestJob.status === "running");
+  }
+}
+
+async function removeRow(rowIndex) {
+  if (!window.confirm("Eintrag wirklich aus CSV entfernen?")) {
+    return;
+  }
+
+  setBusy(true);
+  try {
+    const data = await postJson("/api/therapists/remove", {
+      row_index: rowIndex,
+      csv_signature: currentCsvSignature,
+    });
+    setRows(data.therapists);
+    showToast("Eintrag entfernt");
+  } catch (error) {
+    showErrorToast("Eintrag konnte nicht entfernt werden", error);
+    await refreshStatus();
+  } finally {
+    setBusy(latestJob.status === "running");
+  }
+}
+
+function controlRowIndex(control) {
+  const row = control.closest("tr[data-row-index]");
+  if (!row) {
+    return null;
+  }
+
+  const rowIndex = Number(row.dataset.rowIndex);
+  return Number.isInteger(rowIndex) && rowIndex >= 0 ? rowIndex : null;
 }
 
 function isSafeHttpUrl(val) {
@@ -2342,6 +2581,30 @@ async function startJob(url, payload = {}) {
   startPolling();
   return data;
 }
+
+rowBody.addEventListener("change", (event) => {
+  const target = event.target;
+  if (target?.dataset?.rowAction !== "toggle-excluded") {
+    return;
+  }
+
+  const rowIndex = controlRowIndex(target);
+  if (rowIndex !== null) {
+    updateRowExclusion(rowIndex, !target.checked);
+  }
+});
+
+rowBody.addEventListener("click", (event) => {
+  const target = event.target;
+  if (target?.dataset?.rowAction !== "remove") {
+    return;
+  }
+
+  const rowIndex = controlRowIndex(target);
+  if (rowIndex !== null) {
+    removeRow(rowIndex);
+  }
+});
 
 configForm.addEventListener("submit", async (event) => {
   event.preventDefault();

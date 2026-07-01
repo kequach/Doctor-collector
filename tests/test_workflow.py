@@ -44,10 +44,11 @@ contact:
     )
     csv_path.write_text(
         "\n".join([
-            "name,email,therapist_type,website,profile_url",
-            "Already,old@example.com,Type,,https://example.test/old",
-            "New,new@example.com,Type,,https://example.test/new",
-            "No Mail,,Type,,https://example.test/no-mail",
+            "name,email,therapist_type,website,profile_url,excluded",
+            "Already,old@example.com,Type,,https://example.test/old,",
+            "New,new@example.com,Type,,https://example.test/new,",
+            "Excluded,excluded@example.com,Type,,https://example.test/excluded,yes",
+            "No Mail,,Type,,https://example.test/no-mail,",
         ])
         + "\n",
         encoding="utf-8",

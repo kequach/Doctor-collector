@@ -29,7 +29,7 @@ therapie:
   # Minimum delay between starting HTTP requests (seconds).
   # Increase this if therapie.de returns HTTP 429 Too Many Requests.
   # The scraper also retries 429 responses and waits when therapie.de asks it to.
-  request_delay_seconds: 1.5
+  request_delay_seconds: 2.5
 
 # Therapist filters — exclude profiles whose type contains these keywords
 filters:

@@ -189,6 +189,8 @@ def test_web_serves_favicon_asset(tmp_path):
         ("GET", "/api/status"),
         ("POST", "/api/collect"),
         ("POST", "/api/collect/stop"),
+        ("POST", "/api/therapists/exclude"),
+        ("POST", "/api/therapists/remove"),
         ("POST", "/api/contact"),
     ],
 )
@@ -378,6 +380,7 @@ def test_web_page_includes_request_token(tmp_path):
     assert 'id="job-events"' in rendered
     assert 'id="toast-region"' in rendered
     assert 'id="job-data"' in rendered
+    assert 'id="copy-emails-data"' in rendered
     assert "/assets/styles.css?v=" in rendered
     assert "/assets/app.js?v=" in rendered
     assert "/assets/favicon.png?v=" in rendered
@@ -428,6 +431,14 @@ def test_web_uses_toast_notifications_for_button_actions():
     assert 'startJob("/api/collect", { config_data: collectConfig() })' in _JS
     assert "notifyJobTransition" in _JS
     assert 'refreshButton.addEventListener("click", () => refreshStatus({ notify: true }));' in _JS
+
+
+def test_web_copy_and_row_controls_ignore_excluded_rows():
+    assert 'document.querySelector("#copy-emails-data").textContent' in _JS
+    assert "let copyableEmails = JSON.parse" in _JS
+    assert "copyableEmails = Array.isArray(payload.emails)" in _JS
+    assert 'postJson("/api/therapists/exclude"' in _JS
+    assert 'postJson("/api/therapists/remove"' in _JS
 
 
 def test_web_uses_hidden_form_frame_fallback_to_support_firefox():
@@ -621,6 +632,126 @@ def test_web_rejects_stale_csv_review(tmp_path, monkeypatch):
         )
 
 
+def test_web_payload_marks_excluded_rows_not_contactable(tmp_path, monkeypatch):
+    csv_path = tmp_path / "therapists.csv"
+    csv_path.write_text(
+        "name,email,therapist_type,website,profile_url,excluded\n"
+        "Active,active@example.com,Type,,https://example.test/active,\n"
+        "Duplicate,active@example.com,Type,,https://example.test/duplicate,\n"
+        "Disabled,disabled@example.com,Type,,https://example.test/disabled,yes\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("doctor_collector.web.get_default_csv_path", lambda: csv_path)
+
+    app = DoctorCollectorWebApp(tmp_path / "config.yaml")
+
+    payload = app.therapists_payload()
+
+    assert payload["count"] == 3
+    assert payload["contactable"] == 2
+    assert payload["excluded"] == 1
+    assert payload["emails"] == ["active@example.com"]
+    assert payload["rows"][0]["excluded"] is False
+    assert payload["rows"][2]["excluded"] is True
+
+
+def test_web_can_exclude_and_remove_csv_rows(tmp_path, monkeypatch):
+    csv_path = tmp_path / "therapists.csv"
+    csv_path.write_text(
+        "name,email,therapist_type,website,profile_url,excluded,note\n"
+        "Ada,ada@example.com,Type,,https://example.test/ada,,keep ada\n"
+        "Grace,grace@example.com,Type,,https://example.test/grace,,keep grace\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("doctor_collector.web.get_default_csv_path", lambda: csv_path)
+    app = DoctorCollectorWebApp(tmp_path / "config.yaml")
+
+    status, payload = _request_app_json(
+        app,
+        "/api/therapists/exclude",
+        method="POST",
+        body=_form_body({
+            "doctor_collector_token": app.csrf_token,
+            "row_index": 1,
+            "excluded": "true",
+            "csv_signature": _csv_signature(csv_path),
+        }),
+    )
+
+    assert status == HTTPStatus.OK
+    assert payload["therapists"]["contactable"] == 1
+    assert payload["therapists"]["rows"][1]["excluded"] is True
+    assert "Grace,grace@example.com,Type,,https://example.test/grace,yes,keep grace" in (
+        csv_path.read_text(encoding="utf-8")
+    )
+
+    status, payload = _request_app_json(
+        app,
+        "/api/therapists/remove",
+        method="POST",
+        body=_form_body({
+            "doctor_collector_token": app.csrf_token,
+            "row_index": 0,
+            "csv_signature": payload["therapists"]["csv_signature"],
+        }),
+    )
+
+    assert status == HTTPStatus.OK
+    assert payload["therapists"]["count"] == 1
+    assert payload["therapists"]["rows"][0]["email"] == "grace@example.com"
+    text = csv_path.read_text(encoding="utf-8")
+    assert "ada@example.com" not in text
+    assert "keep grace" in text
+
+
+@pytest.mark.parametrize("path", ["/api/therapists/exclude", "/api/therapists/remove"])
+def test_web_row_edits_require_current_csv_signature(tmp_path, monkeypatch, path):
+    csv_path = tmp_path / "therapists.csv"
+    csv_path.write_text(
+        "name,email,therapist_type,website,profile_url\n"
+        "Ada,ada@example.com,Type,,https://example.test/ada\n",
+        encoding="utf-8",
+    )
+    stale_signature = _csv_signature(csv_path)
+    csv_path.write_text(
+        "name,email,therapist_type,website,profile_url\n"
+        "Grace,grace@example.com,Type,,https://example.test/grace\n",
+        encoding="utf-8",
+    )
+    monkeypatch.setattr("doctor_collector.web.get_default_csv_path", lambda: csv_path)
+    app = DoctorCollectorWebApp(tmp_path / "config.yaml")
+
+    status, payload = _request_app_json(
+        app,
+        path,
+        method="POST",
+        body=_form_body({
+            "doctor_collector_token": app.csrf_token,
+            "row_index": 0,
+            "excluded": "true",
+            "csv_signature": stale_signature,
+        }),
+    )
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert "CSV changed" in payload["error"]
+
+    status, payload = _request_app_json(
+        app,
+        path,
+        method="POST",
+        body=_form_body({
+            "doctor_collector_token": app.csrf_token,
+            "row_index": 0,
+            "excluded": "true",
+        }),
+    )
+
+    assert status == HTTPStatus.BAD_REQUEST
+    assert "CSV changed" in payload["error"]
+    assert "grace@example.com" in csv_path.read_text(encoding="utf-8")
+
+
 def test_web_contact_passes_reviewed_csv_signature_to_workflow(tmp_path, monkeypatch):
     csv_path = tmp_path / "therapists.csv"
     csv_path.write_text("name,email,therapist_type,website,profile_url\n", encoding="utf-8")
@@ -667,6 +798,11 @@ def test_web_page_shows_csv_path_and_copy_email_option(tmp_path, monkeypatch):
     assert "E-Mail-Adressen kopieren" in rendered
     assert "kommagetrennt" in rendered
     assert "ada@example.com" in rendered
+    assert "<th>Aktiv</th>" in rendered
+    assert "<th>Entfernen</th>" in rendered
+    assert 'class="row-remove-cell"' in rendered
+    assert 'data-row-action="toggle-excluded"' in rendered
+    assert 'data-row-action="remove"' in rendered
 
 
 def test_web_host_validation_allows_only_loopback():

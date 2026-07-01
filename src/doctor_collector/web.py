@@ -23,6 +23,7 @@ from urllib.parse import parse_qs, urlparse
 from doctor_collector.config import (
     AppConfig,
     config_to_public_data,
+    load_config_from_data,
     load_config_public_data,
     save_config_data,
     save_config_text,
@@ -43,7 +44,7 @@ _MAX_JOB_EVENTS = 60
 _URL_RE = re.compile(r"https?://\S+")
 _EMAIL_RE = re.compile(r"\b[^\s@]+@[^\s@]+\.[^\s@]+\b")
 _PROFILE_EXTRACTED_PREFIX = "Profil ausgelesen:"
-_ASSET_VERSION = "20260630-6"
+_ASSET_VERSION = "20260701-2"
 _FAVICON_PATH = Path(__file__).with_name("assets") / "favicon.png"
 
 
@@ -93,6 +94,18 @@ def _progress_message_from_log(record: logging.LogRecord) -> str | None:
             return f"Profil ausgelesen: {_sanitize_progress_message(str(args[0]))}"
         if record.msg == "Crawling complete — %d profiles collected" and len(args) >= 1:
             return f"Suche abgeschlossen: {args[0]} Profil(e) ausgelesen."
+        if record.msg == "Skipping profile %s after HTTP %d" and len(args) >= 2:
+            try:
+                status_code = int(args[1])
+            except (TypeError, ValueError):
+                status_code = 0
+            if status_code == 403:
+                return (
+                    "Profil konnte nicht geladen werden: therapie.de hat die "
+                    "Anfrage abgelehnt (HTTP 403). Bitte später erneut versuchen "
+                    "oder die Wartezeit erhöhen."
+                )
+            return f"Profil konnte nicht geladen werden (HTTP {status_code})."
 
     if record.name == "doctor_collector.services.collector":
         if record.msg == "Scraped %d total profiles" and len(args) >= 1:
@@ -297,12 +310,30 @@ class DoctorCollectorWebApp:
         save_config_data(data, self.config_path)
         return load_config_public_data(self.config_path)
 
-    def start_collect(self) -> tuple[bool, dict[str, Any]]:
+    def start_collect(
+        self,
+        *,
+        config_data: dict[str, Any] | None = None,
+    ) -> tuple[bool, dict[str, Any]]:
+        try:
+            runtime_config = (
+                load_config_from_data(
+                    config_data,
+                    self.config_path,
+                    apply_env_overrides=False,
+                )
+                if config_data is not None
+                else None
+            )
+        except ValueError as exc:
+            raise WorkflowError(f"Konfiguration ist ungueltig: {exc}") from exc
+
         def _action(progress: JobProgress) -> dict[str, Any]:
             progress("Konfiguration wird geprüft.")
             result = asyncio.run(
                 collect_therapists(
                     self.config_path,
+                    config=runtime_config,
                     notify=False,
                     apply_env_overrides=False,
                     stop_requested=self.jobs.stop_requested,
@@ -486,7 +517,12 @@ class DoctorCollectorWebApp:
                             app.save_config(config_text)
                             self._send_json({"ok": True, "message": "Config saved."})
                     elif path == "/api/collect":
-                        started, state = app.start_collect()
+                        config_data = data.get("config_data")
+                        if isinstance(config_data, str):
+                            config_data = json.loads(config_data)
+                        if config_data is not None and not isinstance(config_data, dict):
+                            raise WorkflowError("Config data must be an object.")
+                        started, state = app.start_collect(config_data=config_data)
                         status = HTTPStatus.ACCEPTED if started else HTTPStatus.CONFLICT
                         self._send_json({"ok": started, "job": state}, status)
                     elif path == "/api/collect/stop":
@@ -845,6 +881,11 @@ def _render_index(
                   <input id="therapie-max-pages" type="number" min="1" step="1">
                 </label>
                 <label class="field">
+                  <span>Maximale Therapeut:innen</span>
+                  <input id="therapie-max-therapists" type="number" min="0" step="1">
+                  <small>0 = kein Limit.</small>
+                </label>
+                <label class="field">
                   <span>Wartezeit pro Anfrage (Sekunden)</span>
                   <input id="therapie-request-delay-seconds" type="number" min="0.1" step="0.1">
                 </label>
@@ -867,54 +908,6 @@ def _render_index(
           </div>
         </div>
 
-        <div class="settings-section">
-          <div class="settings-header">E-Mail-Text (optional)</div>
-          <div class="settings-body">
-            <label class="field">
-              <span>Betreff</span>
-              <input id="contact-subject" type="text">
-            </label>
-            <label class="field">
-              <span>Nachricht</span>
-              <textarea id="contact-body" rows="12"></textarea>
-            </label>
-          </div>
-        </div>
-
-        <div class="settings-section">
-          <div class="settings-header">SMTP für Web-Versand (optional)</div>
-          <div class="settings-body">
-            <div class="field-grid">
-              <label class="field">
-                <span>SMTP-Server</span>
-                <input id="contact-smtp-host" type="text">
-              </label>
-              <label class="field">
-                <span>SMTP-Port</span>
-                <input id="contact-smtp-port" type="number" min="1" max="65535" step="1">
-              </label>
-              <label class="field">
-                <span>SMTP-Benutzer</span>
-                <input id="contact-smtp-user" type="text">
-              </label>
-              <label class="field">
-                <span>SMTP-Passwort</span>
-                <input id="contact-smtp-password" type="password">
-              </label>
-              <label class="field">
-                <span>Absenderadresse</span>
-                <input id="contact-from-address" type="email">
-              </label>
-              <label class="toggle-field">
-                <span>
-                  <strong>TLS verwenden</strong>
-                </span>
-                <input id="contact-use-tls" type="checkbox">
-              </label>
-            </div>
-          </div>
-        </div>
-
         <div class="form-actions">
           <button id="save-config" class="primary" type="submit">Konfiguration speichern</button>
         </div>
@@ -925,7 +918,7 @@ def _render_index(
         <h2>Schritte</h2>
         <ol class="steps">
           <li>Einstellungen ausfüllen.</li>
-          <li>Konfiguration speichern.</li>
+          <li>Optional: Konfiguration speichern.</li>
           <li>Sammeln starten.</li>
           <li>Tabelle oder CSV-Datei prüfen.</li>
           <li>Optional: E-Mail-Adressen kopieren oder Web-Versand nutzen.</li>
@@ -947,17 +940,6 @@ def _render_index(
           <button id="stop-collect-button" class="danger" type="button" hidden>
             Suche stoppen
           </button>
-          <label class="checkline">
-            <input id="confirm-contact" type="checkbox">
-            CSV geprüft?
-          </label>
-          <button id="contact-button" class="danger" type="button" disabled>
-            E-Mails senden (optional)
-          </button>
-          <p class="note">
-            Der Web-Versand ist optional. Alternativ kannst du die
-            E-Mail-Adressen kopieren und mit deinem eigenen Mailprogramm senden.
-          </p>
         </div>
       </section>
       <section class="panel">
@@ -1026,6 +1008,74 @@ def _render_index(
             {rows}
           </tbody>
         </table>
+      </div>
+      <div class="email-settings">
+        <div class="settings-section">
+          <div class="settings-header">E-Mail-Text (optional)</div>
+          <div class="settings-body">
+            <label class="field">
+              <span>Betreff</span>
+              <input id="contact-subject" type="text">
+            </label>
+            <label class="field">
+              <span>Nachricht</span>
+              <textarea id="contact-body" rows="12"></textarea>
+            </label>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-header">SMTP für Web-Versand (optional)</div>
+          <div class="settings-body">
+            <div class="field-grid">
+              <label class="field">
+                <span>SMTP-Server</span>
+                <input id="contact-smtp-host" type="text">
+              </label>
+              <label class="field">
+                <span>SMTP-Port</span>
+                <input id="contact-smtp-port" type="number" min="1" max="65535" step="1">
+              </label>
+              <label class="field">
+                <span>SMTP-Benutzer</span>
+                <input id="contact-smtp-user" type="text">
+              </label>
+              <label class="field">
+                <span>SMTP-Passwort</span>
+                <input id="contact-smtp-password" type="password">
+              </label>
+              <label class="field">
+                <span>Absenderadresse</span>
+                <input id="contact-from-address" type="email">
+              </label>
+              <label class="toggle-field">
+                <span>
+                  <strong>TLS verwenden</strong>
+                </span>
+                <input id="contact-use-tls" type="checkbox">
+              </label>
+            </div>
+          </div>
+        </div>
+
+        <div class="settings-section">
+          <div class="settings-header">E-Mails senden</div>
+          <div class="settings-body">
+            <div class="stack">
+              <label class="checkline">
+                <input id="confirm-contact" type="checkbox">
+                CSV geprüft?
+              </label>
+              <button id="contact-button" class="danger" type="button" disabled>
+                E-Mails senden (optional)
+              </button>
+              <p class="note">
+                Der Web-Versand ist optional. Alternativ kannst du die
+                E-Mail-Adressen kopieren und mit deinem eigenen Mailprogramm senden.
+              </p>
+            </div>
+          </div>
+        </div>
       </div>
     </section>
   </main>
@@ -1456,6 +1506,12 @@ textarea:focus {
   color: var(--ink);
 }
 
+.field small {
+  color: var(--muted);
+  font-weight: 400;
+  line-height: 1.35;
+}
+
 .toggle-field {
   display: flex;
   align-items: center;
@@ -1607,6 +1663,12 @@ dd {
   overflow-x: auto;
   border: 1px solid var(--line);
   border-radius: 6px;
+}
+
+.email-settings {
+  display: grid;
+  gap: 14px;
+  margin-top: 16px;
 }
 
 table {
@@ -1792,7 +1854,8 @@ function populateConfig(cfg) {
   setValue("therapie-therapy-type", therapie.therapy_type ?? 2);
   setValue("therapie-start-page", therapie.start_page ?? 1);
   setValue("therapie-max-pages", therapie.max_pages ?? 100);
-  setValue("therapie-request-delay-seconds", therapie.request_delay_seconds ?? 1.0);
+  setValue("therapie-max-therapists", therapie.max_therapists ?? 0);
+  setValue("therapie-request-delay-seconds", therapie.request_delay_seconds ?? 1.5);
 
   excludeTypes = Array.isArray(filters.exclude_types)
     ? filters.exclude_types.slice()
@@ -1818,7 +1881,8 @@ function collectConfig() {
       therapy_type: integerValue("therapie-therapy-type", 2),
       start_page: integerValue("therapie-start-page", 1),
       max_pages: integerValue("therapie-max-pages", 100),
-      request_delay_seconds: numberValue("therapie-request-delay-seconds", 1.0),
+      max_therapists: integerValue("therapie-max-therapists", 0),
+      request_delay_seconds: numberValue("therapie-request-delay-seconds", 1.5),
     },
     filters: {
       exclude_types: excludeTypes.slice(),
@@ -2329,7 +2393,7 @@ byId("filter-exclude-add").addEventListener("keydown", (event) => {
 collectButton.addEventListener("click", async () => {
   try {
     clearCsvReview();
-    await startJob("/api/collect");
+    await startJob("/api/collect", { config_data: collectConfig() });
     showToast("Sammeln gestartet");
   } catch (error) {
     jobStatus.textContent = error.message;

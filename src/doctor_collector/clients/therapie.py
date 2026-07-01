@@ -156,7 +156,11 @@ class TherapieClient:
         page_num = 1
         skipped_profiles = False
 
-        while current_url and page_num <= cfg.max_pages:
+        while (
+            current_url
+            and page_num <= cfg.max_pages
+            and (cfg.max_therapists == 0 or len(all_therapists) < cfg.max_therapists)
+        ):
             if self._stop_requested():
                 logger.info("Stopping crawl: stop requested by user")
                 break
@@ -167,6 +171,10 @@ class TherapieClient:
                 logger.info("Found %d profiles on page %d", len(profile_urls), page_num)
                 if not profile_urls and next_url is None and not all_therapists:
                     skipped_profiles = True
+
+                if cfg.max_therapists:
+                    remaining = cfg.max_therapists - len(all_therapists)
+                    profile_urls = profile_urls[:remaining]
 
                 profiles = await self._fetch_profiles_batch(profile_urls)
                 if len(profiles) < len(profile_urls):

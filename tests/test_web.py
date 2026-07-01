@@ -264,6 +264,51 @@ def test_web_config_accepts_form_body_token_and_json_payload(tmp_path):
     assert payload["config_data"]["therapie"]["post_code"] == "10115"
 
 
+def test_web_collect_uses_unsaved_config_payload_without_writing_it(tmp_path, monkeypatch):
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text("therapie:\n  post_code: '10115'\n", encoding="utf-8")
+    seen_config = None
+
+    async def fake_collect(*args, config=None, **kwargs):
+        nonlocal seen_config
+        seen_config = config
+        return CollectSummary(
+            total_profiles_scraped=0,
+            total_matching=0,
+            saved_to=tmp_path / "therapists.csv",
+            therapists=0,
+            csv_saved=True,
+        )
+
+    monkeypatch.setattr("doctor_collector.web.collect_therapists", fake_collect)
+    app = DoctorCollectorWebApp(config_path)
+
+    status, payload = _request_app_json(
+        app,
+        "/api/collect",
+        method="POST",
+        body=_form_body({
+            "doctor_collector_token": app.csrf_token,
+            "config_data": json.dumps({
+                "therapie": {
+                    "post_code": "60320",
+                    "max_therapists": 4,
+                },
+            }),
+        }),
+    )
+    snapshot = _wait_for_job(app)
+
+    assert status == HTTPStatus.ACCEPTED
+    assert payload["ok"] is True
+    assert snapshot["status"] == "succeeded"
+    assert seen_config is not None
+    assert seen_config.therapie.post_code == "60320"
+    assert seen_config.therapie.max_therapists == 4
+    assert "10115" in config_path.read_text(encoding="utf-8")
+    assert "60320" not in config_path.read_text(encoding="utf-8")
+
+
 def test_web_collect_stop_endpoint_marks_running_collect_job(tmp_path):
     app = DoctorCollectorWebApp(tmp_path / "config.yaml")
     finish = threading.Event()
@@ -310,12 +355,21 @@ def test_web_page_includes_request_token(tmp_path):
     assert 'id="therapie-post-code"' in rendered
     assert 'id="contact-smtp-password"' in rendered
     assert 'id="config-data"' in rendered
+    assert 'id="therapie-max-therapists" type="number" min="0"' in rendered
+    assert "0 = kein Limit." in rendered
     assert 'id="therapie-request-delay-seconds" type="number" min="0.1"' in rendered
     assert "Erweiterte Einstellungen" in rendered
     assert "<h2>Schritte</h2>" in rendered
     assert "Einstellungen ausfüllen." in rendered
+    assert "Optional: Konfiguration speichern." in rendered
+    assert "E-Mail-Text (optional)" in rendered
+    assert "SMTP für Web-Versand (optional)" in rendered
     assert "E-Mails senden (optional)" in rendered
     assert "CSV geprüft?" in rendered
+    entries_index = rendered.index("<h2>Gesammelte Einträge</h2>")
+    assert rendered.index("E-Mail-Text (optional)") > entries_index
+    assert rendered.index("SMTP für Web-Versand (optional)") > entries_index
+    assert rendered.index("<div class=\"settings-header\">E-Mails senden</div>") > entries_index
     assert "Keine Daten oder Zugangsdaten werden hochgeladen." in rendered
     assert 'id="copy-emails-button"' in rendered
     assert 'id="job-progress"' in rendered
@@ -371,6 +425,7 @@ def test_web_uses_toast_notifications_for_button_actions():
     assert "Daten konnten nicht aktualisiert werden" in _JS
     assert "E-Mail-Versand gestartet" in _JS
     assert "E-Mail-Versand konnte nicht gestartet werden" in _JS
+    assert 'startJob("/api/collect", { config_data: collectConfig() })' in _JS
     assert "notifyJobTransition" in _JS
     assert 'refreshButton.addEventListener("click", () => refreshStatus({ notify: true }));' in _JS
 
@@ -446,6 +501,11 @@ def test_web_collect_exposes_sanitized_progress_events(tmp_path, monkeypatch):
             "https://example.test/profile?email=ada@example.com",
             "ada@example.com",
         )
+        logging.getLogger("doctor_collector.clients.therapie").warning(
+            "Skipping profile %s after HTTP %d",
+            "https://example.test/profile?email=grace@example.com",
+            403,
+        )
         return CollectSummary(
             total_profiles_scraped=2,
             total_matching=1,
@@ -470,8 +530,15 @@ def test_web_collect_exposes_sanitized_progress_events(tmp_path, monkeypatch):
     assert "1 Profil(e) passen zu den Filtern." in messages
     assert "Skipping profile [URL] after request error: [E-Mail]" in messages
     assert levels["Skipping profile [URL] after request error: [E-Mail]"] == "error"
+    forbidden_message = (
+        "Profil konnte nicht geladen werden: therapie.de hat die Anfrage "
+        "abgelehnt (HTTP 403). Bitte später erneut versuchen oder die Wartezeit erhöhen."
+    )
+    assert forbidden_message in messages
+    assert levels[forbidden_message] == "error"
     assert not any("https://" in message or "10115" in message for message in messages)
     assert not any("ada@example.com" in message for message in messages)
+    assert not any("grace@example.com" in message for message in messages)
 
 
 def test_web_stop_collect_requests_cooperative_stop(tmp_path, monkeypatch):

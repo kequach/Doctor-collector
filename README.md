@@ -131,12 +131,17 @@ therapie:
   therapy_form: 1            # 1 = Einzeltherapie, 2 = Gruppentherapie, 3 = Paar-/Familientherapie
   therapy_type: 2            # 1 = Analytische, 2 = Verhaltenstherapie, 3 = Tiefenpsychologisch, 4 = Systemische
   max_pages: 100             # how many pages of results to go through
-  request_delay_seconds: 1.0 # at least 0.1 seconds between request starts
+  max_therapists: 0          # maximum profiles to gather; 0 means no limit
+  request_delay_seconds: 1.5 # at least 0.1 seconds between request starts
 ```
 
 `search_radius_km` maps to therapie.de's `search_radius` URL parameter. The site currently accepts `10`, `25`, `50`, and `100` km. Unsupported values are rejected by Doctor Collector because therapie.de silently falls back to `10` km instead of returning an error.
 
-If therapie.de returns `HTTP 429 Too Many Requests`, Doctor Collector waits and retries automatically. If it keeps happening, wait a few minutes before running again or increase `therapie.request_delay_seconds` in `config.yaml`. The default is `1.0`, meaning requests are started at least one second apart. The minimum accepted value is `0.1`.
+Set `max_therapists` to a positive number to stop gathering after that many profiles. The default `0` means no limit.
+
+If therapie.de returns `HTTP 429 Too Many Requests`, Doctor Collector waits and retries automatically. If it keeps happening, wait a few minutes before running again or increase `therapie.request_delay_seconds` in `config.yaml`. The default is `1.5`, meaning requests are started at least 1.5 seconds apart. The minimum accepted value is `0.1`.
+
+Be careful with this setting: values that are too low can trigger rate limits or temporary blocking by therapie.de, including `HTTP 403 Forbidden` on profile pages. If you see repeated `429` or `403` responses, stop collecting for a while before trying again, and use a higher `request_delay_seconds` value instead of retrying immediately.
 
 ### Filters
 
@@ -201,7 +206,7 @@ docker run --rm -v ./data:/app/data \
   kequach/doctor-collector python -m doctor_collector --collect
 ```
 
-`THERAPIE_SEARCH_RADIUS_KM` accepts the same values as `search_radius_km`: `10`, `25`, `50`, or `100`.
+`THERAPIE_SEARCH_RADIUS_KM` accepts the same values as `search_radius_km`: `10`, `25`, `50`, or `100`. `THERAPIE_MAX_THERAPISTS=0` means no limit.
 
 **Step 2 — Review the results:**
 

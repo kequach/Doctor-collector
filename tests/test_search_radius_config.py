@@ -30,6 +30,14 @@ def test_loads_search_radius_from_env(tmp_path, monkeypatch):
     assert config.therapie.search_radius_km == 25
 
 
+def test_loads_max_therapists_from_env(tmp_path, monkeypatch):
+    monkeypatch.setenv("THERAPIE_MAX_THERAPISTS", "7")
+
+    config = load_config(tmp_path / "missing.yaml")
+
+    assert config.therapie.max_therapists == 7
+
+
 def test_rejects_unsupported_search_radius():
     with pytest.raises(ValidationError, match="search_radius_km must be one of: 10, 25, 50, 100"):
         TherapieConfig(search_radius_km=20)
@@ -38,6 +46,17 @@ def test_rejects_unsupported_search_radius():
 def test_rejects_zero_request_delay():
     with pytest.raises(ValidationError, match="greater than or equal to 0.1"):
         TherapieConfig(request_delay_seconds=0)
+
+
+def test_request_delay_defaults_to_one_and_a_half_seconds():
+    assert TherapieConfig().request_delay_seconds == 1.5
+
+
+def test_max_therapists_defaults_to_no_limit_and_rejects_negative_values():
+    assert TherapieConfig().max_therapists == 0
+
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        TherapieConfig(max_therapists=-1)
 
 
 def test_start_url_includes_search_radius():

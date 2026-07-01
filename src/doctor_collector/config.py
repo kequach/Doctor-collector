@@ -55,6 +55,7 @@ _ENV_MAP: list[tuple[str, list[str], str]] = [
     ("THERAPIE_THERAPY_TYPE", ["therapie", "therapy_type"], "int"),
     ("THERAPIE_START_PAGE", ["therapie", "start_page"], "int"),
     ("THERAPIE_MAX_PAGES", ["therapie", "max_pages"], "int"),
+    ("THERAPIE_MAX_THERAPISTS", ["therapie", "max_therapists"], "int"),
     ("THERAPIE_REQUEST_DELAY", ["therapie", "request_delay_seconds"], "float"),
     ("FILTER_EXCLUDE_TYPES", ["filters", "exclude_types"], "list"),
     ("CONTACT_SUBJECT", ["contact", "subject"], "str"),
@@ -118,7 +119,8 @@ class TherapieConfig(BaseModel):
     therapy_type: int = Field(default=2, ge=1)
     start_page: int = Field(default=1, ge=1)
     max_pages: int = Field(default=100, ge=1)
-    request_delay_seconds: float = Field(default=1.0, ge=0.1)
+    max_therapists: int = Field(default=0, ge=0)
+    request_delay_seconds: float = Field(default=1.5, ge=0.1)
 
     @field_validator("search_radius_km")
     @classmethod
@@ -192,11 +194,7 @@ def read_config_text(path: Path | str | None = None) -> str:
     if config_path.exists():
         return config_path.read_text(encoding="utf-8")
 
-    return yaml.safe_dump(
-        AppConfig().model_dump(mode="json"),
-        sort_keys=False,
-        allow_unicode=True,
-    )
+    return _dump_config_yaml(AppConfig())
 
 
 def save_config_text(text: str, path: Path | str | None = None) -> AppConfig:
@@ -292,8 +290,7 @@ def load_config_public_data(path: Path | str | None = None) -> dict[str, Any]:
     return data
 
 
-def save_config_data(data: dict[str, Any], path: Path | str | None = None) -> AppConfig:
-    """Validate and persist structured config data from the web UI."""
+def _prepare_config_data(data: dict[str, Any], path: Path | str | None = None) -> dict[str, Any]:
     if not isinstance(data, dict):
         raise ValueError("config data must be an object")
 
@@ -305,7 +302,23 @@ def save_config_data(data: dict[str, Any], path: Path | str | None = None) -> Ap
     if contact.get("smtp_password") == _SECRET_PLACEHOLDER:
         contact["smtp_password"] = _raw_smtp_password(path)
 
-    config = AppConfig.model_validate(restored)
+    return restored
+
+
+def load_config_from_data(
+    data: dict[str, Any],
+    path: Path | str | None = None,
+    *,
+    apply_env_overrides: bool = False,
+) -> AppConfig:
+    """Validate structured config data from the web UI without persisting it."""
+    restored = _prepare_config_data(data, path)
+    return _config_from_raw(restored, apply_env_overrides=apply_env_overrides)
+
+
+def save_config_data(data: dict[str, Any], path: Path | str | None = None) -> AppConfig:
+    """Validate and persist structured config data from the web UI."""
+    config = AppConfig.model_validate(_prepare_config_data(data, path))
     config_path = Path(path) if path else _DEFAULT_CONFIG_PATH
     config_path.parent.mkdir(parents=True, exist_ok=True)
     config_path.write_text(_dump_config_yaml(config), encoding="utf-8")
@@ -314,14 +327,20 @@ def save_config_data(data: dict[str, Any], path: Path | str | None = None) -> Ap
 
 def _dump_config_yaml(config: AppConfig) -> str:
     data = config.model_dump(mode="json")
+    dumped = yaml.safe_dump(
+        data,
+        sort_keys=False,
+        allow_unicode=True,
+    )
+    dumped = dumped.replace(
+        "  max_therapists:",
+        "  # max_therapists: 0 bedeutet kein Limit.\n  max_therapists:",
+        1,
+    )
     return (
         "# Doctor Collector configuration\n"
         "# Edit this file directly, or run `python -m doctor_collector --web`.\n"
-        + yaml.safe_dump(
-            data,
-            sort_keys=False,
-            allow_unicode=True,
-        )
+        + dumped
     )
 
 

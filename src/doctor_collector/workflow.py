@@ -9,7 +9,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
-from doctor_collector.config import load_config
+from doctor_collector.config import AppConfig, load_config
 from doctor_collector.models.therapist import TherapistProfile
 from doctor_collector.notifications.console import ConsoleNotifier
 from doctor_collector.services.collector import TherapistCollector
@@ -43,6 +43,7 @@ class ContactSummary:
 async def collect_therapists(
     config_path: str | Path | None = None,
     *,
+    config: AppConfig | None = None,
     notify: bool = True,
     csv_file: Path | None = None,
     state_file: Path | None = None,
@@ -51,12 +52,12 @@ async def collect_therapists(
     stop_wait: StopWait | None = None,
 ) -> CollectSummary:
     """Run collection through the existing collector service."""
-    config = load_config(config_path, apply_env_overrides=apply_env_overrides)
-    if not config.therapie.post_code:
+    active_config = config or load_config(config_path, apply_env_overrides=apply_env_overrides)
+    if not active_config.therapie.post_code:
         raise WorkflowError("No post_code configured - set therapie.post_code in config.yaml")
 
     collector = TherapistCollector(
-        config,
+        active_config,
         state_file=state_file,
         csv_file=csv_file,
         stop_requested=stop_requested,

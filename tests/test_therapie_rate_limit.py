@@ -250,6 +250,59 @@ async def test_fetch_listings_marks_empty_first_page_as_incomplete(monkeypatch):
 
 
 @pytest.mark.asyncio
+async def test_fetch_listings_limits_gathered_therapists(monkeypatch):
+    parsed_pages: list[str] = []
+    fetched_batches: list[list[str]] = []
+    client = TherapieClient(
+        AppConfig(
+            therapie=TherapieConfig(
+                post_code="10115",
+                max_therapists=2,
+                request_delay_seconds=0.1,
+            ),
+        ),
+    )
+
+    async def parse_listing_page(url: str):
+        parsed_pages.append(url)
+        return [
+            "https://www.therapie.de/profil/ada/",
+            "https://www.therapie.de/profil/grace/",
+            "https://www.therapie.de/profil/katherine/",
+        ], "https://www.therapie.de/page/2"
+
+    async def fetch_profiles_batch(urls: list[str]):
+        fetched_batches.append(urls)
+        return [
+            TherapistProfile(
+                name=url.rstrip("/").rsplit("/", 1)[-1],
+                email=f"{index}@example.com",
+                therapist_type="Type",
+                profile_url=url,
+            )
+            for index, url in enumerate(urls, start=1)
+        ]
+
+    monkeypatch.setattr(client, "_parse_listing_page", parse_listing_page)
+    monkeypatch.setattr(client, "_fetch_profiles_batch", fetch_profiles_batch)
+
+    try:
+        profiles = await client.fetch_therapist_listings()
+    finally:
+        await client.aclose()
+
+    assert [profile.name for profile in profiles] == ["ada", "grace"]
+    assert len(parsed_pages) == 1
+    assert fetched_batches == [
+        [
+            "https://www.therapie.de/profil/ada/",
+            "https://www.therapie.de/profil/grace/",
+        ],
+    ]
+    assert client.last_crawl_completed is True
+
+
+@pytest.mark.asyncio
 async def test_fetch_listings_stops_after_current_page_when_requested(monkeypatch):
     stop = False
     parsed_pages: list[str] = []

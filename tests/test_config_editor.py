@@ -7,6 +7,7 @@ from pydantic import ValidationError
 
 from doctor_collector.config import (
     load_config,
+    load_config_from_data,
     load_config_from_text,
     load_config_public_data,
     save_config_data,
@@ -138,6 +139,24 @@ contact:
     assert "${CONTACT_FROM_ADDRESS}" in saved_text
     assert "real-user@example.com" not in saved_text
     assert "real-from@example.com" not in saved_text
+
+
+def test_load_config_from_data_resolves_unchanged_env_placeholders(tmp_path, monkeypatch):
+    monkeypatch.setenv("THERAPIE_POST_CODE", "10115")
+    config_path = tmp_path / "config.yaml"
+    config_path.write_text(
+        """
+therapie:
+  post_code: "${THERAPIE_POST_CODE}"
+""",
+        encoding="utf-8",
+    )
+
+    data = load_config_public_data(config_path)
+    config = load_config_from_data(data, config_path)
+
+    assert data["therapie"]["post_code"] == "${THERAPIE_POST_CODE}"
+    assert config.therapie.post_code == "10115"
 
 
 def test_save_config_data_allows_replacing_env_placeholder(tmp_path, monkeypatch):

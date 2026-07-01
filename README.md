@@ -1,7 +1,15 @@
 # Doctor Collector
 
-Automatically find therapists on [therapie.de](https://www.therapie.de) and send them a request for an initial consultation (Erstgespräch) via email.
+Doctor Collector is a local Python app for finding therapist contact details on
+[therapie.de](https://www.therapie.de), reviewing the collected results, and
+optionally sending an initial consultation request (Erstgespräch) by email.
+
+Use the browser-based web UI for guided configuration, collection progress,
+CSV/table review, and optional email sending, or run the same collect-first,
+contact-second workflow from the command line. The project is packaged as a CLI application with a localhost web UI, configuration file support and Docker examples.
+
 ![web UI](docs/img/webui.png)
+
 ## Quick Start
 
 ### 1. Install Python
